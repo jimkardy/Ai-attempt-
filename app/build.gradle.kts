@@ -11,8 +11,8 @@ android {
         applicationId = "com.aiattempt.debroid"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.1.1"
     }
 
     // The debug builds published on the `debugging` branch are signed with a throwaway

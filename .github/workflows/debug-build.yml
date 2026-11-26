@@ -67,15 +67,16 @@ jobs:
       - name: Publish pre-release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: debug-v0.1.0
+          tag_name: debug-v0.1.1
           target_commitish: ${{ github.sha }}
-          name: Debroid 0.1.0 - debug build (install and test)
+          name: Debroid 0.1.1 - debug build (install and test)
           prerelease: true
           files: |
             app/build/outputs/apk/debug/*.apk
             apk.sha256
           body: |
-            **Debug build - install and test.** Not a stable release.
+            **Debug build - install and test.** Not stable, not finished: this build has no Debian
+            guest yet, it is the diagnostics shell. MIT licensed.
 
             Install: download the APK, allow "install unknown apps" for your browser/file manager,
             tap it. It is signed with the repo's throwaway test key, so newer debug builds install
