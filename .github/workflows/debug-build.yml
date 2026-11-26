@@ -76,6 +76,21 @@ jobs:
           echo "ABI_GATE_OK"
           sha256sum "$APK" | tee apk.sha256
 
+      - name: Read app version from the APK
+        run: |
+          set -euo pipefail
+          SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          BT="$(ls -d "$SDK"/build-tools/* | sort -V | tail -1)"
+          APK="$(find app/build/outputs/apk/debug -name '*.apk' | head -1)"
+          LINE="$("$BT/aapt2" dump badging "$APK" | head -1)"
+          VERSION_NAME="$(sed -E "s/.*versionName='([^']+)'.*/\1/" <<<"$LINE")"
+          VERSION_CODE="$(sed -E "s/.*versionCode='([^']+)'.*/\1/" <<<"$LINE")"
+          test -n "$VERSION_NAME" && test -n "$VERSION_CODE"
+          echo "APK version: $VERSION_NAME ($VERSION_CODE)"
+          # The release tag must follow app/build.gradle.kts, otherwise every build
+          # would overwrite the same pre-release.
+          echo "VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -86,9 +101,9 @@ jobs:
       - name: Publish pre-release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: debug-v0.2.0
+          tag_name: debug-v${{ env.VERSION_NAME }}
           target_commitish: ${{ github.sha }}
-          name: Debroid 0.2.0 - debug build (install and test)
+          name: Debroid ${{ env.VERSION_NAME }} - debug build (install and test)
           prerelease: true
           files: |
             app/build/outputs/apk/debug/*.apk
@@ -103,7 +118,13 @@ jobs:
             tap it. It is signed with the repo's throwaway test key, so newer debug builds install
             over this one without uninstalling.
 
-            What is new in 0.2.0:
+            What is new in 0.2.1:
+            - the VM tab renders immediately on launch (it used to look empty until you switched tabs)
+            - fixed the crash when opening the Create VM form (child already has a parent)
+            - the Create VM button is never hidden: it greys out while both slots are used and
+              returns to its normal colour when you delete a VM
+
+            What works so far:
             - VM tab is the home page: create up to 2 VMs, docker-style cards, start/stop/restart/delete
             - create form is bounded by the device: cores up to the CPU count, RAM by free memory,
               disk by free storage - no unlimited values, no free-text sizes
