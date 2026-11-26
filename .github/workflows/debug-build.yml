@@ -72,7 +72,7 @@ jobs:
           echo "$BADGING" | grep -E "package:|sdkVersion|targetSdkVersion|native-code|application-label:" || true
           # Enforce the support contract: arm64 only, Android 10 floor.
           echo "$BADGING" | grep -q "native-code: 'arm64-v8a'" || { echo "MISSING arm64-v8a native code: APK would install on unsupported CPUs"; exit 1; }
-          echo "$BADGING" | grep -q "sdkVersion:'29'" || { echo "minSdk is not 29"; exit 1; }
+          echo "$BADGING" | grep -q "minSdkVersion:'29'" || { echo "minSdk is not 29"; exit 1; }
           echo "ABI_GATE_OK"
           sha256sum "$APK" | tee apk.sha256
 
