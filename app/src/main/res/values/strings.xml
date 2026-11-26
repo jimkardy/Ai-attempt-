@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Debroid</string>
+    <string name="tab_terminal">Terminal</string>
+    <string name="tab_vm">VM</string>
+    <string name="tab_debug">Debug</string>
+    <string name="share_logs">Share logs</string>
+    <string name="copy_all">Copy everything</string>
+</resources>

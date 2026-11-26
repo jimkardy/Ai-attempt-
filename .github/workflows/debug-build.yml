@@ -1,0 +1,77 @@
+name: debug-build
+
+on:
+  push:
+    branches: [debugging]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: debug-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build debug APK
+        run: ./gradlew --no-daemon --stacktrace assembleDebug
+
+      - name: Verify the APK is installable
+        run: |
+          set -euo pipefail
+          SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          BT="$(ls -d "$SDK"/build-tools/* | sort -V | tail -1)"
+          APK="$(find app/build/outputs/apk/debug -name '*.apk' | head -1)"
+          test -n "$APK"
+          echo "== APK: $APK ($(stat -c%s "$APK") bytes)"
+          "$BT/apksigner" verify --verbose --print-certs "$APK"
+          "$BT/zipalign" -c -v 4 "$APK" > /dev/null && echo "ZIPALIGN_OK"
+          "$BT/aapt2" dump badging "$APK" | grep -E "package:|sdkVersion|targetSdkVersion|native-code|application-label:" || true
+          sha256sum "$APK" | tee apk.sha256
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: debroid-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+
+      - name: Publish pre-release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: debug-v0.1.0
+          name: Debroid 0.1.0 - debug build (install and test)
+          prerelease: true
+          files: |
+            app/build/outputs/apk/debug/*.apk
+            apk.sha256
+          body: |
+            **Debug build - install and test.** Not a stable release.
+
+            Install: download the APK, allow "install unknown apps" for your browser/file manager,
+            tap it. It is signed with the repo's throwaway test key, so newer debug builds install
+            over this one without uninstalling.
+
+            If anything goes wrong: open the app's **Debug** tab, tap **Copy everything** and paste
+            it into an issue here. If the app will not open at all, the crash is saved and shown on
+            the next launch.
+
+            What is in this build: diagnostics shell (Debug tab, crash capture, self-test, host
+            shell terminal, persisted logs). The UML/Debian engine is not bundled yet.
