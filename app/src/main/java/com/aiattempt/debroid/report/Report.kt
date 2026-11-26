@@ -9,7 +9,9 @@ import androidx.core.content.FileProvider
 import com.aiattempt.debroid.log.LogStore
 import com.aiattempt.debroid.sys.DeviceSupport
 import com.aiattempt.debroid.sys.SysInfo
+import com.aiattempt.debroid.vm.VmImage
 import com.aiattempt.debroid.vm.VmManager
+import com.aiattempt.debroid.vm.VmProcess
 import java.io.File
 import java.io.FileOutputStream
 import java.net.URLEncoder
@@ -36,6 +38,14 @@ object Report {
             appendLine("--- Self-test ---")
             appendLine(selfTest)
         }
+        appendLine("--- UML ---")
+        runCatching {
+            val vm = VmManager.running(ctx) ?: VmManager.list(ctx).firstOrNull()
+            appendLine(VmProcess.describe(ctx, vm).trimEnd())
+            appendLine(VmImage.describe(ctx))
+            appendLine("log budget   : ${LogStore.totalBytes() / 1024} KB of ${LogStore.TOTAL_BUDGET_BYTES / (1024 * 1024)} MB")
+        }
+        appendLine()
         val consoles = runCatching { VmManager.consoleDump(ctx) }.getOrDefault("")
         if (consoles.isNotBlank()) {
             appendLine("--- VM consoles ---")

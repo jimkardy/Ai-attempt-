@@ -6,6 +6,7 @@ import android.os.Build
 import com.aiattempt.debroid.BuildConfig
 import com.aiattempt.debroid.log.Channel
 import com.aiattempt.debroid.log.LogStore
+import com.aiattempt.debroid.vm.VmImage
 import com.aiattempt.debroid.vm.VmManager
 import com.aiattempt.debroid.vm.VmProcess
 import java.io.File
@@ -119,20 +120,31 @@ object SelfTest {
             result(out, false, "vm inventory", "${t.javaClass.simpleName}: ${t.message}")
         }
 
-        // 9. engine artefacts
+        // 9. engine artefacts: the kernel, the stub helper and every VM disk
         try {
             val kernel = VmProcess.kernelPath(ctx)
-            result(out, kernel != null, "engine kernel", kernel?.name ?: "absent (arrives in the next milestone)")
+            result(
+                out, kernel != null, "engine kernel",
+                kernel?.let { "${it.name} (${it.length()} bytes)" } ?: "missing from nativeLibraryDir"
+            )
+            val stub = VmProcess.stubPath(ctx)
+            result(
+                out, stub != null, "engine stub helper",
+                stub?.let { "${it.name} (${it.length()} bytes)" } ?: "missing from nativeLibraryDir"
+            )
             val vms = VmManager.list(ctx)
             if (vms.isEmpty()) {
-                out.appendLine("       rootfs: no VM created yet")
+                out.appendLine("       disk image: no VM created yet")
             } else {
                 vms.forEach { vm ->
-                    val rootfs = VmProcess.rootfsPath(ctx, vm)
-                    out.appendLine("       rootfs ${vm.name}: ${if (rootfs.exists()) rootfs.absolutePath else "absent"}")
+                    val disk = VmProcess.diskPath(ctx, vm)
+                    out.appendLine(
+                        "       disk ${vm.name}: " +
+                            if (disk.exists()) "${disk.length() / (1024 * 1024)} MB" else "absent (created on first start)"
+                    )
                 }
             }
-            result(out, true, "assets root", (ctx.assets.list("")?.toList() ?: emptyList()).joinToString(", "))
+            out.appendLine("       base image: ${VmImage.describe(ctx).lines().first()}")
         } catch (t: Throwable) {
             result(out, false, "engine artefacts", "${t.javaClass.simpleName}: ${t.message}")
         }

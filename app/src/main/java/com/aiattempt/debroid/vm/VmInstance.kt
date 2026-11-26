@@ -14,12 +14,12 @@ data class PortForward(val host: Int, val guest: Int)
  */
 data class VmInstance(
     val id: String,
-    val name: String,
+    var name: String,
     val distro: String = "debian-trixie",
-    val cores: Int,
-    val ramMb: Int,
-    val diskMb: Int,
-    val ports: List<PortForward> = emptyList(),
+    var cores: Int,
+    var ramMb: Int,
+    var diskMb: Int,
+    var ports: List<PortForward> = emptyList(),
     val createdAt: Long = System.currentTimeMillis(),
     var state: VmState = VmState.STOPPED,
     var message: String = "Created — not started yet",

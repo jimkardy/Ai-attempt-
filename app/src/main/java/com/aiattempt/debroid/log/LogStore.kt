@@ -26,13 +26,20 @@ enum class Channel(val label: String) {
 
 object LogStore {
     private const val MAX_LINES = 4000
-    private const val MAX_FILE_BYTES = 2L * 1024 * 1024
+    /** One channel file before it is rotated. */
+    private const val MAX_FILE_BYTES = 4L * 1024 * 1024
+    /** Rotated copies kept per channel (0 is the live file). */
+    private const val MAX_BACKUPS = 2
+    /** Hard ceiling for the whole log directory. Older files are dropped above this. */
+    const val TOTAL_BUDGET_BYTES = 100L * 1024 * 1024
     private const val TAG = "Debroid"
 
     private val buffers = HashMap<Channel, ArrayDeque<String>>()
     private val listeners = CopyOnWriteArrayList<() -> Unit>()
     private val fmt = SimpleDateFormat("MM-dd HH:mm:ss.SSS", Locale.US)
     private val fileLock = Any()
+
+    private var writesSinceBudget = 0
 
     @Volatile
     private var dir: File? = null
@@ -152,15 +159,65 @@ object LogStore {
         synchronized(fileLock) {
             try {
                 val f = File(d, "log-${channel.name.lowercase(Locale.US)}.txt")
-                if (f.length() > MAX_FILE_BYTES) {
-                    val old = File(d, f.name + ".1")
-                    old.delete()
-                    f.renameTo(old)
-                }
+                if (f.length() > MAX_FILE_BYTES) rotate(f)
                 f.appendText(line + "\n")
+                writesSinceBudget++
+                if (writesSinceBudget >= 64) {
+                    writesSinceBudget = 0
+                    enforceBudget(d)
+                }
             } catch (_: Throwable) {
             }
         }
+    }
+
+    /** log-app.txt.1 → .2, log-app.txt → .1, oldest copy dropped. */
+    private fun rotate(f: File) {
+        val dir = f.parentFile ?: return
+        File(dir, "${f.name}.$MAX_BACKUPS").delete()
+        for (i in MAX_BACKUPS downTo 1) {
+            val from = File(dir, "${f.name}.$i")
+            if (from.exists()) from.renameTo(File(dir, "${f.name}.$((i + 1).coerceAtMost(MAX_BACKUPS + 1))"))
+        }
+        f.renameTo(File(dir, "${f.name}.1"))
+    }
+
+    /**
+     * Keeps the log directory under [TOTAL_BUDGET_BYTES]. Rotated files go first,
+     * oldest first; the live per-channel files are only ever truncated, never
+     * deleted, so the newest lines always survive.
+     */
+    private fun enforceBudget(dir: File) {
+        try {
+            val files = dir.listFiles()?.filter { it.isFile && it.name.startsWith("log-") } ?: return
+            var total = files.sumOf { it.length() }
+            if (total <= TOTAL_BUDGET_BYTES) return
+            val oldestFirst = files.sortedBy { it.lastModified() }
+            for (f in oldestFirst) {
+                if (total <= TOTAL_BUDGET_BYTES) break
+                val live = f.name.endsWith(".txt")
+                if (live) continue
+                val len = f.length()
+                if (f.delete()) total -= len
+            }
+            if (total > TOTAL_BUDGET_BYTES) {
+                for (f in oldestFirst.filter { it.name.endsWith(".txt") }) {
+                    if (total <= TOTAL_BUDGET_BYTES) break
+                    val len = f.length()
+                    val keep = runCatching { f.readLines().takeLast(MAX_LINES / 2).joinToString("\n") }.getOrDefault("")
+                    runCatching { f.writeText(keep + "\n") }
+                    total -= len - f.length()
+                }
+            }
+        } catch (_: Throwable) {
+        }
+    }
+
+    /** Size of everything on disk in the log directory. */
+    fun totalBytes(): Long = try {
+        dir?.listFiles()?.filter { it.isFile }?.sumOf { it.length() } ?: 0L
+    } catch (_: Throwable) {
+        0L
     }
 
     private fun notifyThrottled() {

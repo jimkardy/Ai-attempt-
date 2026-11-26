@@ -12,8 +12,18 @@ concurrency:
   group: debug-build-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # Pinned upstream arm64 UML kernel (GPL-2.0). Provenance: native/uml/NOTICE.md
+  UML_REPO: zalexdev/linux-um-arm64
+  UML_TAG: prebuilt-20260816
+  UML_COMMIT: a528aeed4c28
+  KERNEL_SHA256: 280be89df3bf6f3607fbbb993d3130399d90658c2ced13ececa1fd07dbe55845
+  STUB_SHA256: 83f51f7c45133daa135b595562b09c5e2829f1d0f1e00b7fce2a7695370781fc
+  ROOTFS_ASSET: debroid-rootfs-trixie-arm64.ext4.gz
+
 jobs:
-  build:
+  # ---------------------------------------------------------------- the APK
+  apk:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -53,6 +63,22 @@ jobs:
             -o app/src/main/jniLibs/arm64-v8a/libdebroid-abi.so native/abi-gate/abi_gate.c
           ls -l app/src/main/jniLibs/arm64-v8a/
 
+      # The kernel itself: a static aarch64 bionic binary, exec'd straight out of
+      # nativeLibraryDir. GPL-2.0 — see native/uml/NOTICE.md for commit and hashes.
+      # Both files are verified before they are allowed into the APK.
+      - name: Fetch the pinned arm64 UML kernel
+        run: |
+          set -euo pipefail
+          BASE="https://github.com/${UML_REPO}/releases/download/${UML_TAG}"
+          DEST=app/src/main/jniLibs/arm64-v8a
+          curl -fsSL -o "$DEST/libuml-kernel-16k.so" "$BASE/linux"
+          curl -fsSL -o "$DEST/libstub_exe.so" "$BASE/stub_exe"
+          echo "${KERNEL_SHA256}  $DEST/libuml-kernel-16k.so" | sha256sum -c -
+          echo "${STUB_SHA256}  $DEST/libstub_exe.so" | sha256sum -c -
+          file "$DEST/libuml-kernel-16k.so" "$DEST/libstub_exe.so"
+          chmod 0755 "$DEST/libuml-kernel-16k.so" "$DEST/libstub_exe.so"
+          ls -l "$DEST"
+
       - name: Build debug APK
         run: |
           chmod +x ./gradlew
@@ -73,30 +99,121 @@ jobs:
           # Enforce the support contract: arm64 only, Android 10 floor.
           echo "$BADGING" | grep -q "native-code: 'arm64-v8a'" || { echo "MISSING arm64-v8a native code: APK would install on unsupported CPUs"; exit 1; }
           echo "$BADGING" | grep -q "minSdkVersion:'29'" || { echo "minSdk is not 29"; exit 1; }
+          # The kernel and the stub helper must actually be inside the APK.
+          unzip -l "$APK" | grep -q "lib/arm64-v8a/libuml-kernel-16k.so" || { echo "UML kernel missing from the APK"; exit 1; }
+          unzip -l "$APK" | grep -q "lib/arm64-v8a/libstub_exe.so" || { echo "UML stub helper missing from the APK"; exit 1; }
           echo "ABI_GATE_OK"
-          sha256sum "$APK" | tee apk.sha256
+          mkdir -p dist
+          cp "$APK" dist/app-debug.apk
+          ( cd dist && sha256sum app-debug.apk > apk.sha256 )
 
       - name: Read app version from the APK
         run: |
           set -euo pipefail
           SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
           BT="$(ls -d "$SDK"/build-tools/* | sort -V | tail -1)"
-          APK="$(find app/build/outputs/apk/debug -name '*.apk' | head -1)"
-          LINE="$("$BT/aapt2" dump badging "$APK" | head -1)"
+          LINE="$("$BT/aapt2" dump badging dist/app-debug.apk | head -1)"
           VERSION_NAME="$(sed -E "s/.*versionName='([^']+)'.*/\1/" <<<"$LINE")"
           VERSION_CODE="$(sed -E "s/.*versionCode='([^']+)'.*/\1/" <<<"$LINE")"
           test -n "$VERSION_NAME" && test -n "$VERSION_CODE"
           echo "APK version: $VERSION_NAME ($VERSION_CODE)"
           # The release tag must follow app/build.gradle.kts, otherwise every build
           # would overwrite the same pre-release.
-          echo "VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
+          echo "$VERSION_NAME" > dist/version.txt
+          echo "$GITHUB_SHA" > dist/commit.txt
 
-      - name: Upload artifact
+      - name: Upload the APK
         uses: actions/upload-artifact@v4
         with:
-          name: debroid-debug-apk
-          path: app/build/outputs/apk/debug/*.apk
+          name: debroid-apk
+          path: dist/*
           if-no-files-found: error
+
+  # ------------------------------------------------------------- the guest fs
+  # A real Debian trixie arm64 filesystem in a 2 GiB ext4 image, built on a native
+  # arm64 runner (no qemu). It is published with the APK, so the APK and the image
+  # it boots always come from the same commit.
+  rootfs:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the Debian trixie arm64 disk image
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          docker run --rm \
+            -e ROOTFS_ASSET="${ROOTFS_ASSET}" \
+            -v "$PWD/dist:/out" \
+            -v "$PWD/native/rootfs:/rootfs-src:ro" \
+            debian:trixie bash -euo pipefail -c '
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update
+              apt-get install -y --no-install-recommends debootstrap e2fsprogs gzip ca-certificates
+              debootstrap --variant=minbase --arch=arm64 \
+                --include=iproute2,procps,e2fsprogs,less,curl,ca-certificates,nano,kmod,locales \
+                trixie /chroot http://deb.debian.org/debian
+              install -m 0755 /rootfs-src/debroid-init /chroot/sbin/debroid-init
+              printf "debroid\n" > /chroot/etc/hostname
+              printf "127.0.0.1 localhost debroid\n::1 localhost debroid\n" > /chroot/etc/hosts
+              printf "nameserver 1.1.1.1\nnameserver 9.9.9.9\n" > /chroot/etc/resolv.conf
+              printf "proc /proc proc defaults 0 0\nsysfs /sys sysfs defaults 0 0\ndevpts /dev/pts devpts defaults 0 0\ntmpfs /tmp tmpfs defaults 0 0\n" > /chroot/etc/fstab
+              test -x /chroot/sbin/debroid-init
+              test -f /chroot/etc/debian_version
+              truncate -s 2G /out/base.ext4
+              mke2fs -q -t ext4 -d /chroot -L debroid-root -O ^has_journal -m 0 /out/base.ext4
+              dumpe2fs -h /out/base.ext4 | grep -q "Filesystem magic number:.*0xEF53"
+              gzip -9 -c /out/base.ext4 > "/out/$ROOTFS_ASSET"
+              rm -f /out/base.ext4
+              du -h "/out/$ROOTFS_ASSET"
+            '
+
+      - name: Verify and checksum the image
+        run: |
+          set -euo pipefail
+          ls -l dist
+          test -f "dist/${ROOTFS_ASSET}" || { echo "the rootfs asset was not produced"; exit 1; }
+          python3 - "dist/${ROOTFS_ASSET}" <<'PY'
+          import gzip, sys, os
+          path = sys.argv[1]
+          with gzip.open(path, "rb") as f:
+              head = f.read(1200)
+          magic = head[1080:1082]
+          assert magic == b"\x53\xef", f"no ext4 superblock magic, got {magic!r}"
+          size = os.path.getsize(path)
+          print(f"ext4 magic ok, asset {size} bytes ({size/1024/1024:.1f} MB compressed)")
+          PY
+          ( cd dist && sha256sum "${ROOTFS_ASSET}" > rootfs.sha256 && cat rootfs.sha256 )
+
+      - name: Upload the guest image
+        uses: actions/upload-artifact@v4
+        with:
+          name: debroid-rootfs
+          path: dist/*
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------- the release
+  release:
+    needs: [apk, rootfs]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download both artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Attach the third-party notice and read the version
+        run: |
+          set -euo pipefail
+          cp native/uml/NOTICE.md dist/NOTICE.md
+          ls -l dist
+          VERSION_NAME="$(cat dist/version.txt)"
+          test -n "$VERSION_NAME"
+          echo "VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
+          echo "release tag: debug-v$VERSION_NAME"
 
       - name: Publish pre-release
         uses: softprops/action-gh-release@v2
@@ -106,33 +223,43 @@ jobs:
           name: Debroid ${{ env.VERSION_NAME }} - debug build (install and test)
           prerelease: true
           files: |
-            app/build/outputs/apk/debug/*.apk
-            apk.sha256
+            dist/app-debug.apk
+            dist/apk.sha256
+            dist/${{ env.ROOTFS_ASSET }}
+            dist/rootfs.sha256
+            dist/NOTICE.md
           body: |
-            **Debug build - install and test.** Not stable, not finished: the VM manager is real,
-            the Debian guest is not bundled yet. MIT licensed.
+            **Debug build — install and test.** Not stable, not finished. MIT licensed app code,
+            GPL-2.0 kernel: every file in this release says where it came from.
 
-            **arm64-v8a only, Android 10-15.** 32-bit, x86 and x86_64 phones are refused at install.
+            **Built from commit `${{ github.sha }}`** — this tag's *Source code (zip/tar.gz)* is
+            exactly the code this APK was compiled from, including the workflow that built it.
+
+            **arm64-v8a only, Android 10–15.** 32-bit, x86 and x86_64 phones are refused at install.
+
+            ## What is new in 0.3.0
+
+            - **VMs actually boot.** The APK now ships the arm64 UML kernel
+              (`zalexdev/linux-um-arm64`, GPL-2.0, pinned commit `${{ env.UML_COMMIT }}`), so Start
+              runs a real Linux kernel as an ordinary app process — no root, no KVM.
+            - The Debian 13 (trixie) arm64 disk image is attached to this release
+              (`${{ env.ROOTFS_ASSET }}`). Debroid fetches it once, on the first Start, keeps it for
+              every VM and clones it per VM. It is far too large to live inside an APK.
+            - Each VM gets its own writable ext4 disk on UML's `ubd0`; the guest grows the
+              filesystem to the disk size you reserved, at boot.
+            - **Edit button**: the small gear at the top right of each VM card opens an editor for
+              name, cores, RAM, disk and port forwards, with the same device-bounded controls as the
+              create form.
+            - **Reclaim Android storage** (inside the editor): runs `fstrim -v /` and clears
+              Debroid's own caches, and reports exactly what Android answered. Android only allows
+              `fstrim` for root, so on a stock phone it tells you it was refused instead of lying.
+            - Much more logging: the Engine channel records the full kernel argv, the files and
+              sizes involved, the image download and the exit code, so a failed boot is reproducible.
+            - Logs are capped at **100 MB total** with rotation; old rotated files are dropped first.
 
             Install: download the APK, allow "install unknown apps" for your browser/file manager,
             tap it. It is signed with the repo's throwaway test key, so newer debug builds install
-            over this one without uninstalling.
+            over this one without uninstalling. Needs a network connection the first time you press
+            Start (to fetch the Debian image).
 
-            What is new in 0.2.1:
-            - the VM tab renders immediately on launch (it used to look empty until you switched tabs)
-            - fixed the crash when opening the Create VM form (child already has a parent)
-            - the Create VM button is never hidden: it greys out while both slots are used and
-              returns to its normal colour when you delete a VM
-
-            What works so far:
-            - VM tab is the home page: create up to 2 VMs, docker-style cards, start/stop/restart/delete
-            - create form is bounded by the device: cores up to the CPU count, RAM by free memory,
-              disk by free storage - no unlimited values, no free-text sizes
-            - one VM runs at a time; starting a second stops the first
-            - Terminal tab: Start button when idle, live guest console when running
-            - Debug tab: one panel with all logs and a big COPY EVERYTHING button at the top
-
-            Pressing Start without the kernel bundled reports exactly what is missing instead of
-            pretending to boot. arm64 UML kernel + Debian rootfs are the next milestone.
-
-            If anything goes wrong: Debug tab -> **Copy everything** -> paste it into an issue here.
+            If anything goes wrong: Debug tab → **Copy everything** → paste it into an issue here.

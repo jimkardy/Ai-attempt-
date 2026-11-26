@@ -67,6 +67,10 @@ object VmManager {
     var runningId: String? = null
         private set
 
+    /** Set while the Debian image is being fetched/cloned for a VM. */
+    @Volatile
+    private var preparingId: String? = null
+
     private var process: VmProcess? = null
 
     /** Called on any state change. Must be cheap; the UI refreshes from [list]. */
@@ -87,8 +91,10 @@ object VmManager {
         }
         loaded = true
         runningId = null
+        preparingId = null
         VmStore.save(ctx, items)
         LogStore.log(Channel.APP, "VM store loaded: ${items.size} of $MAX_VMS")
+        LogStore.log(Channel.ENGINE, "UML image on device: ${VmImage.isReady(ctx)}")
     }
 
     private fun ensure(ctx: Context) {
@@ -187,12 +193,10 @@ object VmManager {
                 .coerceAtLeast(MIN_RAM_MB)
             val safeDisk = alignDown(diskMb.coerceIn(MIN_DISK_MB, budget.diskMaxMb).coerceAtLeast(MIN_DISK_MB), DISK_STEP_MB)
                 .coerceAtLeast(MIN_DISK_MB)
-            val cleanPorts = ports.filter { it.host in 1024..65535 && it.guest in 1..65535 }
-                .distinctBy { it.host }
-                .take(8)
+            val cleanPorts = cleanPorts(ports)
 
             val id = UUID.randomUUID().toString()
-            val finalName = uniqueName(name)
+            val finalName = uniqueName(name, null)
             val vm = VmInstance(
                 id = id,
                 name = finalName,
@@ -214,20 +218,74 @@ object VmManager {
                 )
             }
 
-            val diskOk = VmStore.allocateDisk(ctx, id, safeDisk)
-            appendConsole(
-                ctx, vm,
-                if (diskOk) "sparse disk image ready: ${safeDisk} MB nominal, 0 MB used"
-                else "warning: disk image could not be created; the VM will not boot"
-            )
+            // The disk itself is materialised on the first Start, from the shared
+            // Debian image, so creating a VM stays instant and costs no storage.
+            appendConsole(ctx, vm, "disk: ${VmInstance.formatDisk(safeDisk)} reserved, created on first start")
             appendConsole(ctx, vm, "Debian suite: ${vm.distroLabel()}")
             cleanPorts.forEach { p -> appendConsole(ctx, vm, "port forward: host ${p.host} -> guest ${p.guest}") }
 
             items.add(vm)
             VmStore.save(ctx, items)
+            LogStore.log(Channel.ENGINE, "VM created: ${vm.name} (${vm.id}) ${vm.specLine}")
+            notifyChanged()
+            return Result.success(vm)
         }
-        notifyChanged()
-        return Result.success(find(ctx, items.last().id) ?: items.last())
+    }
+
+    /**
+     * Edits an existing VM. Resources are clamped to the device as usual; the disk
+     * can only grow, because the image already holds this guest's filesystem.
+     * Changes are persisted immediately and used on the next boot.
+     */
+    fun update(
+        ctx: Context,
+        id: String,
+        name: String,
+        cores: Int,
+        ramMb: Int,
+        diskMb: Int,
+        ports: List<PortForward>
+    ): Result<VmInstance> {
+        ensure(ctx)
+        val budget = budget(ctx)
+        synchronized(lock) {
+            val vm = items.firstOrNull { it.id == id }
+                ?: return Result.failure(IllegalStateException("That VM no longer exists."))
+            val safeCores = cores.coerceIn(1, budget.cores)
+            val safeRam = alignDown(ramMb.coerceIn(MIN_RAM_MB, budget.ramMaxMb).coerceAtLeast(MIN_RAM_MB), RAM_STEP_MB)
+                .coerceAtLeast(MIN_RAM_MB)
+            val onDiskMb = runCatching {
+                (VmStore.diskImage(ctx, id).length() / (1024 * 1024)).toInt()
+            }.getOrDefault(0)
+            val diskMin = maxOf(MIN_DISK_MB, onDiskMb)
+            val diskCeil = maxOf(budget.diskMaxMb, diskMin)
+            val safeDisk = alignDown(diskMb.coerceIn(diskMin, diskCeil), DISK_STEP_MB).coerceAtLeast(diskMin)
+            val clean = cleanPorts(ports)
+
+            val resourcesChanged = safeCores != vm.cores || safeRam != vm.ramMb || safeDisk != vm.diskMb
+            vm.name = uniqueName(name, id)
+            vm.cores = safeCores
+            vm.ramMb = safeRam
+            vm.diskMb = safeDisk
+            vm.ports = clean
+
+            val running = runningId == id
+            if (resourcesChanged) {
+                vm.message = if (running) "Resource changes apply after a restart" else "Updated — press Start"
+                appendConsole(
+                    ctx, vm,
+                    "edited: $safeCores cores / $safeRam MB RAM / ${VmInstance.formatDisk(safeDisk)}" +
+                        if (running) " (applies after a restart)" else ""
+                )
+            } else {
+                appendConsole(ctx, vm, "edited: name and port forwards updated")
+            }
+            appendConsole(ctx, vm, "port forwards: " + if (clean.isEmpty()) "none" else clean.joinToString(", ") { "host ${it.host} -> ${it.guest}" })
+            VmStore.save(ctx, items)
+            LogStore.log(Channel.ENGINE, "VM edited: ${vm.name} (${vm.id}) ${vm.specLine}")
+            notifyChanged()
+            return Result.success(vm)
+        }
     }
 
     fun delete(ctx: Context, id: String): Result<Unit> {
@@ -238,9 +296,11 @@ object VmManager {
             if (runningId == id) {
                 stopLocked(ctx, vm, "Stopped because the VM was deleted")
             }
+            if (preparingId == id) preparingId = null
             items.remove(vm)
             VmStore.deleteVm(ctx, id)
             VmStore.save(ctx, items)
+            LogStore.log(Channel.ENGINE, "VM deleted: ${vm.name} (${vm.id})")
         }
         notifyChanged()
         return Result.success(Unit)
@@ -255,6 +315,7 @@ object VmManager {
             val vm = items.firstOrNull { it.id == id } ?: return Result.failure(
                 IllegalStateException("That VM no longer exists.")
             )
+            if (preparingId == id) return Result.success(Unit)
             if (runningId == id && process?.isAlive == true) return Result.success(Unit)
 
             // One VM at a time: stop the other one first, on purpose.
@@ -268,7 +329,7 @@ object VmManager {
             val available = budget(ctx).ramFreeMb
             if (available < MIN_FREE_RAM_TO_START_MB || vm.ramMb > available - APP_RESERVE_RAM_MB) {
                 val msg = "Not enough free RAM to start: the VM asks for ${vm.ramMb} MB, Android reports " +
-                    "$available MB free. Close some apps, or delete and recreate the VM with less RAM."
+                    "$available MB free. Close some apps, or edit the VM and give it less RAM."
                 vm.state = VmState.STOPPED
                 vm.message = msg
                 appendConsole(ctx, vm, msg)
@@ -278,52 +339,101 @@ object VmManager {
             }
 
             vm.state = VmState.STARTING
-            vm.message = "Starting…"
             appendConsole(ctx, vm, "start requested ($available MB free RAM)")
-            VmStore.save(ctx, items)
+            LogStore.log(Channel.ENGINE, "start ${vm.name}: ${available} MB free RAM")
 
-            val launch = VmProcess.launch(
-                ctx = ctx,
-                vm = vm,
-                onLine = { line -> appendConsole(ctx, vm, line) },
-                onExit = { code ->
-                    synchronized(lock) {
-                        vm.state = if (code == 0) VmState.STOPPED else VmState.ERROR
-                        vm.message = if (code == 0) "Exited cleanly" else "Guest exited with code $code"
-                        vm.lastExit = code
-                        vm.startedAt = null
-                        if (runningId == vm.id) {
-                            runningId = null
-                            process = null
-                        }
-                        VmStore.save(ctx, items)
-                    }
-                    appendConsole(ctx, vm, "guest process ended, exit code $code")
-                    notifyChanged()
+            if (!VmImage.hasBootableDisk(ctx, vm)) {
+                vm.message = "Fetching the Debian image…"
+                appendConsole(ctx, vm, "the Debian trixie arm64 disk image is not on this device yet — fetching it now")
+                preparingId = id
+                VmStore.save(ctx, items)
+                Thread({ prepareAndLaunch(ctx, vm) }, "debroid-image-${id.take(6)}").apply {
+                    isDaemon = true
+                    start()
                 }
-            )
-
-            when (launch) {
-                is VmProcess.LaunchResult.Missing -> {
-                    vm.state = VmState.STOPPED
-                    vm.message = launch.reason
-                    appendConsole(ctx, vm, launch.reason)
-                    appendConsole(ctx, vm, "missing: " + VmProcess.missingArtefacts(ctx, vm).joinToString(", "))
-                    failure = Result.failure(IllegalStateException(launch.reason))
-                }
-                is VmProcess.LaunchResult.Started -> {
-                    process = launch.process
-                    runningId = vm.id
-                    vm.state = VmState.RUNNING
-                    vm.startedAt = System.currentTimeMillis()
-                    vm.message = "Running"
-                    appendConsole(ctx, vm, "kernel launched, console attached")
-                }
+            } else {
+                failure = launchLocked(ctx, vm)
             }
             VmStore.save(ctx, items)
         }
         notifyChanged()
         return failure ?: Result.success(Unit)
+    }
+
+    /** Runs off the main thread: fetch/clone the image, then boot. */
+    private fun prepareAndLaunch(ctx: Context, vm: VmInstance) {
+        val result = VmImage.ensureDiskImage(ctx, vm) { line -> appendConsole(ctx, vm, line) }
+        var gone = false
+        synchronized(lock) {
+            if (preparingId == vm.id) preparingId = null
+            if (items.none { it.id == vm.id }) gone = true
+            VmStore.save(ctx, items)
+        }
+        if (gone) {
+            notifyChanged()
+            return
+        }
+        result.onSuccess {
+            synchronized(lock) {
+                launchLocked(ctx, vm)
+                VmStore.save(ctx, items)
+            }
+        }.onFailure {
+            synchronized(lock) {
+                vm.state = VmState.ERROR
+                vm.message = "Could not fetch the Debian image: ${it.message ?: it.javaClass.simpleName}"
+                appendConsole(ctx, vm, vm.message)
+                appendConsole(ctx, vm, "check the connection, then press Start again — a partial download is discarded")
+                VmStore.save(ctx, items)
+            }
+        }
+        notifyChanged()
+    }
+
+    /** Must be called with [lock] held. */
+    private fun launchLocked(ctx: Context, vm: VmInstance): Result<Unit> {
+        vm.state = VmState.STARTING
+        vm.message = "Starting…"
+        appendConsole(ctx, vm, "booting the UML kernel with ${vm.ramMb} MB RAM")
+        val launch = VmProcess.launch(
+            ctx = ctx,
+            vm = vm,
+            onLine = { line -> appendConsole(ctx, vm, line) },
+            onExit = { code ->
+                synchronized(lock) {
+                    vm.state = if (code == 0) VmState.STOPPED else VmState.ERROR
+                    vm.message = if (code == 0) "Exited cleanly" else "Guest exited with code $code"
+                    vm.lastExit = code
+                    vm.startedAt = null
+                    if (runningId == vm.id) {
+                        runningId = null
+                        process = null
+                    }
+                    VmStore.save(ctx, items)
+                }
+                appendConsole(ctx, vm, "guest process ended, exit code $code")
+                notifyChanged()
+            }
+        )
+
+        return when (launch) {
+            is VmProcess.LaunchResult.Missing -> {
+                vm.state = VmState.STOPPED
+                vm.message = launch.reason
+                appendConsole(ctx, vm, launch.reason)
+                appendConsole(ctx, vm, "missing: " + VmProcess.missingArtefacts(ctx, vm).joinToString(", "))
+                Result.failure(IllegalStateException(launch.reason))
+            }
+            is VmProcess.LaunchResult.Started -> {
+                process = launch.process
+                runningId = vm.id
+                vm.state = VmState.RUNNING
+                vm.startedAt = System.currentTimeMillis()
+                vm.message = "Running"
+                appendConsole(ctx, vm, "kernel launched, console attached")
+                Result.success(Unit)
+            }
+        }
     }
 
     fun stop(ctx: Context, id: String): Result<Unit> {
@@ -352,6 +462,7 @@ object VmManager {
         vm.startedAt = null
         vm.message = reason
         appendConsole(ctx, vm, reason)
+        LogStore.log(Channel.ENGINE, "stop ${vm.name}: $reason")
     }
 
     fun sendInput(ctx: Context, id: String, line: String): Boolean {
@@ -364,11 +475,20 @@ object VmManager {
 
     fun isRunning(ctx: Context, id: String): Boolean = runningId == id && process?.isAlive == true
 
+    fun isPreparing(id: String): Boolean = preparingId == id
+
     // ---- console ----------------------------------------------------------
 
     fun appendConsole(ctx: Context, vm: VmInstance?, line: String) {
-        if (vm == null || line.isBlank() && false) return
         val target = vm ?: return
+        if (line.isBlank()) {
+            // Still record blank kernel lines: boot output uses them as separators.
+            try {
+                VmStore.consoleFile(ctx, target.id).appendText("\n")
+            } catch (_: Throwable) {
+            }
+            return
+        }
         val stamped = "${LogStore.stamp()}  $line"
         try {
             val f = VmStore.consoleFile(ctx, target.id)
@@ -412,11 +532,17 @@ object VmManager {
         runCatching { onChanged?.invoke() }
     }
 
-    private fun uniqueName(requested: String): String {
+    private fun cleanPorts(ports: List<PortForward>): List<PortForward> =
+        ports.filter { it.host in 1024..65535 && it.guest in 1..65535 }
+            .distinctBy { it.host }
+            .take(8)
+
+    private fun uniqueName(requested: String, exceptId: String?): String {
         val base = requested.trim().ifEmpty { "Debian" }.take(24)
-        if (items.none { it.name.equals(base, ignoreCase = true) }) return base
+        val others = items.filter { it.id != exceptId }
+        if (others.none { it.name.equals(base, ignoreCase = true) }) return base
         var n = 2
-        while (items.any { it.name.equals("$base $n", ignoreCase = true) }) n++
+        while (others.any { it.name.equals("$base $n", ignoreCase = true) }) n++
         return "$base $n"
     }
 }

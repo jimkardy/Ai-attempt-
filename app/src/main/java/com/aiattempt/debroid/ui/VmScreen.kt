@@ -187,6 +187,13 @@ class VmScreen(
                 LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
             )
             titleRow.addView(activity.pill(vm.state.name, stateColor))
+            // Small gear, top-right of the card: edit resources, ports and storage.
+            titleRow.addView(
+                activity.iconButton(R.drawable.ic_settings, "Edit ${vm.name}") { openEditSheet(vm) },
+                LinearLayout.LayoutParams(activity.dpi(40), activity.dpi(40)).apply {
+                    marginStart = activity.dpi(8)
+                }
+            )
             addView(titleRow)
 
             addView(
@@ -285,6 +292,12 @@ class VmScreen(
                 refresh()
             }
             .show()
+    }
+
+    private fun openEditSheet(vm: VmInstance) {
+        runCatching { EditVmSheet(activity, vm) { refresh() }.show() }.onFailure {
+            toast("Could not open the editor: ${it.message ?: it.javaClass.simpleName}")
+        }
     }
 
     private fun openCreateSheet() {

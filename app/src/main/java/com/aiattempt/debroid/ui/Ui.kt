@@ -116,6 +116,22 @@ fun Context.outlinedButton(text: String): MaterialButton = buttonBase(text).appl
     setStrokeColor(ColorStateList.valueOf(color(R.color.outline)))
 }
 
+/** Small square icon button used for per-card actions (the edit gear). */
+fun Context.iconButton(iconRes: Int, description: String, onClick: () -> Unit): MaterialButton =
+    buttonBase("").apply {
+        icon = ContextCompat.getDrawable(this@iconButton, iconRes)
+        iconSize = dpi(18)
+        iconGravity = MaterialButton.ICON_GRAVITY_TEXT_START
+        iconPadding = 0
+        iconTint = ColorStateList.valueOf(color(R.color.on_surface_2))
+        backgroundTintList = ColorStateList.valueOf(color(R.color.surface_2))
+        contentDescription = description
+        minWidth = dpi(40)
+        minimumWidth = dpi(40)
+        setPadding(0, 0, 0, 0)
+        setOnClickListener { onClick() }
+    }
+
 fun Context.dangerButton(text: String): MaterialButton = buttonBase(text).apply {
     backgroundTintList = ColorStateList.valueOf(color(R.color.surface))
     setTextColor(color(R.color.err))
