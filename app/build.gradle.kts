@@ -12,8 +12,8 @@ android {
         // Android 10 is the floor: arm64 phones that support UML are 10+.
         minSdk = 29
         targetSdk = 35
-        versionCode = 3
-        versionName = "0.2.0"
+        versionCode = 4
+        versionName = "0.2.1"
 
         // Debroid is arm64-v8a ONLY. The UML kernel and the Debian guest are
         // aarch64; a 32-bit or x86 phone could never run them. CI drops an

@@ -12,6 +12,7 @@ import com.aiattempt.debroid.R
 import com.aiattempt.debroid.vm.VmInstance
 import com.aiattempt.debroid.vm.VmManager
 import com.aiattempt.debroid.vm.VmState
+import com.google.android.material.button.MaterialButton
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 
 /**
@@ -29,6 +30,7 @@ class VmScreen(
     private val capacityPill: TextView = activity.pill("0 of ${VmManager.MAX_VMS}")
     private val budgetText: TextView = activity.captionText("")
     private val emptyHint: TextView = activity.bodyText("", 13f)
+    private val createButton: MaterialButton = activity.primaryButton("Create VM")
 
     private var lastCount = -1
 
@@ -55,9 +57,27 @@ class VmScreen(
             setPadding(activity.dpi(12), activity.dpi(6), activity.dpi(12), activity.dpi(12))
         }
         footer.addView(emptyHint)
+        footer.addView(
+            createButton,
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, activity.dpi(48)).apply {
+                topMargin = activity.dpi(8)
+            }
+        )
+        createButton.setOnClickListener { openCreateSheet() }
         col.addView(footer)
 
         root = col
+
+        // First render happens during onCreate, before the view is attached, so
+        // render again the moment it is: otherwise the landing tab stays blank
+        // until the user switches tabs.
+        root.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+            override fun onViewAttachedToWindow(v: View) {
+                runCatching { render() }
+            }
+
+            override fun onViewDetachedFromWindow(v: View) = Unit
+        })
     }
 
     fun refresh() {
@@ -79,9 +99,17 @@ class VmScreen(
             vms.forEach { vm -> listColumn.addView(vmCard(vm)) }
         }
 
+        // The create button is only ever disabled — never hidden — and comes back
+        // to its normal colour as soon as a VM is deleted.
+        val full = vms.size >= VmManager.MAX_VMS
+        val canCreate = !full && budget.reason == null
+        createButton.visibility = if (vms.isEmpty()) View.GONE else View.VISIBLE
+        createButton.isEnabled = canCreate
+        createButton.alpha = if (canCreate) 1f else 0.4f
+
         emptyHint.text = when {
             budget.reason != null -> budget.reason
-            vms.size >= VmManager.MAX_VMS -> "Capacity reached: delete a VM to create another one."
+            full -> "Capacity reached: delete a VM to create another one."
             else -> "Each VM is a full Debian arm64 userland on its own sparse disk."
         }
         lastCount = vms.size
@@ -112,6 +140,7 @@ class VmScreen(
             addView(
                 activity.primaryButton("Create VM").apply {
                     isEnabled = reason == null
+                    alpha = if (reason == null) 1f else 0.4f
                     setOnClickListener { openCreateSheet() }
                 },
                 LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, activity.dpi(52)).apply {

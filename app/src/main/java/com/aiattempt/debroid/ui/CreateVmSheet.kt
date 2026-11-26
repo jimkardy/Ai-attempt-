@@ -33,6 +33,18 @@ class CreateVmSheet(
     private val budget = VmManager.budget(activity)
 
     fun show() {
+        // The form is built by hand, so a mistake in it must never take the app
+        // down with it: report it and stay alive.
+        runCatching { buildSheet() }.onFailure {
+            Toast.makeText(
+                activity,
+                "Could not open the form: ${it.message ?: it.javaClass.simpleName}",
+                Toast.LENGTH_LONG
+            ).show()
+        }
+    }
+
+    private fun buildSheet() {
         val sheet = BottomSheetDialog(activity)
         val col = activity.column().apply {
             setPadding(activity.dpi(20), activity.dpi(12), activity.dpi(20), activity.dpi(24))
@@ -299,6 +311,8 @@ class CreateVmSheet(
 
     private fun stepperRow(minus: View, value: TextView, plus: View): View = activity.row().apply {
         setPadding(0, activity.dpi(6), 0, 0)
+        // The value may already sit in a label row; a view can only have one parent.
+        (value.parent as? ViewGroup)?.removeView(value)
         value.gravity = Gravity.CENTER
         value.textSize = 16f
         addView(minus, LinearLayout.LayoutParams(activity.dpi(56), activity.dpi(44)))

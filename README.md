@@ -5,7 +5,7 @@ no root, no emulator, no `proot`.
 
 > ## ⚠️ NOT DONE. NOT STABLE. DO NOT TRUST IT WITH ANYTHING.
 >
-> 0.2.0 ships the VM manager: create up to two VMs with device-checked resources, start / stop /
+> 0.2.1 ships the VM manager: create up to two VMs with device-checked resources, start / stop /
 > restart / delete them, and a terminal tab wired to the guest console. **The arm64 UML kernel and
 > the Debian rootfs are not bundled yet**, so pressing Start tells you exactly which artefact is
 > missing instead of pretending to boot. Expect breakage. Nothing here is production ready.
@@ -20,7 +20,14 @@ no root, no emulator, no `proot`.
 | RAM | 2 GB minimum (3 GB+ recommended) |
 | Storage | 6 GB free minimum |
 
-## What works in 0.2.0
+## Changes in 0.2.1
+
+- The VM tab now renders on first launch instead of staying blank until you switch tabs.
+- Fixed the crash (`The specified child already has a parent`) when opening **Create VM**.
+- The **Create VM** button is always available: greyed out while both VM slots are used, back to
+  normal as soon as you delete one.
+
+## What works in 0.2.1
 
 | Feature | State |
 |---|---|
