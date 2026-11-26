@@ -21,6 +21,13 @@ no root, no emulator, no `proot`.
 | Storage | 6 GB free minimum (the Debian image itself is ~2 GB before compression) |
 | Network | needed once, on the first Start, to fetch the Debian image |
 
+## Changes in 0.3.1
+
+- Pressing Start on a VM that has no disk image yet now hands the console to that VM immediately, so
+  the Terminal tab shows the Debian image download instead of "No VM is running".
+- Stop (or deleting the VM) during that download cancels it, and the guest no longer boots
+  afterwards without being asked.
+
 ## Changes in 0.3.0
 
 - **VMs boot.** The arm64 UML kernel (`zalexdev/linux-um-arm64`, GPL-2.0, pinned commit

@@ -346,6 +346,9 @@ object VmManager {
                 vm.message = "Fetching the Debian image…"
                 appendConsole(ctx, vm, "the Debian trixie arm64 disk image is not on this device yet — fetching it now")
                 preparingId = id
+                // Own the console while the image is fetching, so the Terminal tab
+                // shows the progress instead of "No VM is running".
+                runningId = id
                 VmStore.save(ctx, items)
                 Thread({ prepareAndLaunch(ctx, vm) }, "debroid-image-${id.take(6)}").apply {
                     isDaemon = true
@@ -363,13 +366,17 @@ object VmManager {
     /** Runs off the main thread: fetch/clone the image, then boot. */
     private fun prepareAndLaunch(ctx: Context, vm: VmInstance) {
         val result = VmImage.ensureDiskImage(ctx, vm) { line -> appendConsole(ctx, vm, line) }
-        var gone = false
+        var cancelled = false
         synchronized(lock) {
+            // The user may have pressed Stop (or deleted the VM) while the image was
+            // downloading; in that case the guest must not boot behind their back.
+            cancelled = preparingId != vm.id || items.none { it.id == vm.id }
             if (preparingId == vm.id) preparingId = null
-            if (items.none { it.id == vm.id }) gone = true
+            if (cancelled && runningId == vm.id) runningId = null
             VmStore.save(ctx, items)
         }
-        if (gone) {
+        if (cancelled) {
+            appendConsole(ctx, vm, "image preparation cancelled — nothing was started")
             notifyChanged()
             return
         }
@@ -381,6 +388,7 @@ object VmManager {
         }.onFailure {
             synchronized(lock) {
                 vm.state = VmState.ERROR
+                if (runningId == vm.id) runningId = null
                 vm.message = "Could not fetch the Debian image: ${it.message ?: it.javaClass.simpleName}"
                 appendConsole(ctx, vm, vm.message)
                 appendConsole(ctx, vm, "check the connection, then press Start again — a partial download is discarded")
@@ -457,6 +465,10 @@ object VmManager {
     private fun stopLocked(ctx: Context, vm: VmInstance, reason: String) {
         runCatching { process?.terminate() }
         process = null
+        if (preparingId == vm.id) {
+            preparingId = null
+            appendConsole(ctx, vm, "image fetch cancelled")
+        }
         if (runningId == vm.id) runningId = null
         vm.state = VmState.STOPPED
         vm.startedAt = null

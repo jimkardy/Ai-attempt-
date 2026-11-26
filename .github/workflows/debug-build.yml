@@ -237,7 +237,14 @@ jobs:
 
             **arm64-v8a only, Android 10–15.** 32-bit, x86 and x86_64 phones are refused at install.
 
-            ## What is new in 0.3.0
+            ## What is new in 0.3.1
+
+            - Pressing Start on a VM without a disk image now hands the console to that VM at once, so
+              the Terminal tab shows the Debian image download instead of "No VM is running"; Stop or
+              Delete during the download cancels it instead of booting behind your back.
+            - Everything from 0.3.0 below.
+
+            ## What arrived in 0.3.0
 
             - **VMs actually boot.** The APK now ships the arm64 UML kernel
               (`zalexdev/linux-um-arm64`, GPL-2.0, pinned commit `${{ env.UML_COMMIT }}`), so Start
