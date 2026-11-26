@@ -9,10 +9,27 @@ android {
 
     defaultConfig {
         applicationId = "com.aiattempt.debroid"
-        minSdk = 26
+        // Android 10 is the floor: arm64 phones that support UML are 10+.
+        minSdk = 29
         targetSdk = 35
-        versionCode = 2
-        versionName = "0.1.1"
+        versionCode = 3
+        versionName = "0.2.0"
+
+        // Debroid is arm64-v8a ONLY. The UML kernel and the Debian guest are
+        // aarch64; a 32-bit or x86 phone could never run them. CI drops an
+        // arm64-v8a native library into the APK, which makes Android refuse to
+        // install it on any other ABI instead of installing and failing later.
+        ndk {
+            abiFilters += "arm64-v8a"
+        }
+    }
+
+    // The UML kernel will be exec'd straight out of nativeLibraryDir, which is
+    // only allowed when the library is extracted rather than used in place.
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+        }
     }
 
     // The debug builds published on the `debugging` branch are signed with a throwaway

@@ -58,6 +58,9 @@ object LogStore {
     /** Directory holding the log files (may be null if init never ran). */
     fun logDir(): File? = dir
 
+    /** Timestamp prefix used by log lines and VM consoles. */
+    fun stamp(): String = synchronized(fmt) { fmt.format(Date()) }
+
     fun log(channel: Channel, message: String) {
         val line = "${fmt.format(Date())}  $message"
         synchronized(buffers) {

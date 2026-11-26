@@ -2,246 +2,223 @@ package com.aiattempt.debroid.ui
 
 import android.os.Handler
 import android.os.Looper
+import android.text.InputType
+import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
-import android.widget.AdapterView
-import android.widget.ArrayAdapter
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
-import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
-import androidx.appcompat.widget.SwitchCompat
 import androidx.lifecycle.lifecycleScope
+import com.aiattempt.debroid.R
 import com.aiattempt.debroid.log.Channel
 import com.aiattempt.debroid.log.LogStore
 import com.aiattempt.debroid.report.Report
+import com.aiattempt.debroid.shell.ShellSession
 import com.aiattempt.debroid.sys.SelfTest
-import com.aiattempt.debroid.sys.SysInfo
-import com.aiattempt.debroid.vm.VmController
+import com.aiattempt.debroid.vm.VmManager
+import com.google.android.material.button.MaterialButton
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 
 /**
- * The Debug tab: everything a maintainer would ask for, one tap away from the
- * clipboard. Every action is guarded so a failure here can never crash the app.
+ * The Debug tab: one square with every log that matters, one big copy button at
+ * the top. Everything is local; sharing only happens when the user asks.
  */
 class DebugScreen(private val activity: AppCompatActivity) {
 
     val root: View
 
-    private val engineText: TextView
-    private val logText: TextView
+    private val logView: TextView
     private val logScroll: ScrollView
-    private val selfTestText: TextView
-    private val crashText: TextView
     private val crashCard: View
-    private val channelSpinner: Spinner
-    private val liveSwitch: SwitchCompat
+    private val crashText: TextView
 
-    private var channel: Channel = Channel.APP
+    private var channel: Channel? = null // null == ALL
+    private val channelButtons = ArrayList<Pair<MaterialButton, Channel?>>()
+    private var lastRendered = ""
     private var lastSelfTest: String? = null
-    private var started = false
 
     private val handler = Handler(Looper.getMainLooper())
     private val ticker = object : Runnable {
         override fun run() {
-            runCatching { refreshLive() }
-            if (started) handler.postDelayed(this, 1500)
+            if (root.isAttachedToWindow) runCatching { renderLogs() }
+            handler.postDelayed(this, 1500)
         }
     }
 
     init {
         val col = activity.column()
 
-        // ---- action row ----------------------------------------------------
-        val actions = activity.row().apply { setPadding(activity.dpi(6), activity.dpi(8), activity.dpi(6), 0) }
-        val actionsScroll = android.widget.HorizontalScrollView(activity).apply {
-            isHorizontalScrollBarEnabled = false
-            addView(actions)
+        // ---- the big one ---------------------------------------------------
+        val copyWrap = activity.column().apply {
+            setPadding(activity.dpi(12), activity.dpi(8), activity.dpi(12), 0)
         }
-        col.addView(actionsScroll)
-
-        actions.addView(activity.actionButton("Copy everything").apply {
-            setOnClickListener { copyAll() }
-        })
-        actions.addView(activity.actionButton("Share").apply {
-            setOnClickListener { runCatching { Report.shareText(activity, buildReport()) } }
-        })
-        actions.addView(activity.actionButton("Save ZIP").apply {
-            setOnClickListener { saveZip() }
-        })
-        actions.addView(activity.actionButton("New issue").apply {
-            setOnClickListener { newIssue() }
-        })
+        copyWrap.addView(
+            activity.primaryButton("COPY EVERYTHING").apply {
+                textSize = 15f
+                setOnClickListener { copyEverything() }
+            },
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, activity.dpi(56))
+        )
+        col.addView(copyWrap)
 
         // ---- crash banner --------------------------------------------------
-        crashText = activity.monoText("", 10f)
+        crashText = activity.monoText("", 10.5f)
         crashCard = activity.card {
-            addView(activity.titleText("Last session crashed"))
+            addView(activity.titleText("Last session crashed").apply { textSize = 16f })
             addView(crashText)
-            val row = activity.row().apply { setPadding(activity.dpi(12), 0, activity.dpi(12), activity.dpi(10)) }
-            row.addView(activity.actionButton("Copy crash").apply {
-                setOnClickListener {
-                    val text = LogStore.pendingCrash().orEmpty()
-                    if (Report.copy(activity, text)) toast("Crash copied")
-                }
-            })
-            row.addView(activity.actionButton("Dismiss").apply {
-                setOnClickListener {
-                    LogStore.acknowledgeCrash()
-                    crashCard.visibility = View.GONE
-                }
-            })
-            addView(row)
+            addView(
+                activity.actionRow(
+                    activity.tonalButton("Copy crash").apply {
+                        setOnClickListener {
+                            val text = LogStore.pendingCrash().orEmpty()
+                            if (Report.copy(activity, text)) toast("Crash copied")
+                        }
+                    },
+                    activity.tonalButton("Dismiss").apply {
+                        setOnClickListener {
+                            LogStore.acknowledgeCrash()
+                            crashCard.visibility = View.GONE
+                        }
+                    }
+                )
+            )
         }
         crashCard.visibility = View.GONE
         col.addView(crashCard)
 
-        // ---- scroll body ---------------------------------------------------
-        val body = activity.column()
+        // ---- channel selector ----------------------------------------------
+        val chips = activity.row().apply { setPadding(activity.dpi(6), activity.dpi(2), activity.dpi(6), 0) }
+        addChannelButton(chips, "ALL", null)
+        Channel.entries.forEach { ch -> addChannelButton(chips, ch.label, ch) }
+        col.addView(activity.hScroll(chips))
 
-        // device & build
-        val device = activity.monoText(runCatching { SysInfo.report(activity) }.getOrDefault("unavailable"), 10f)
-        body.addView(activity.card {
-            addView(activity.titleText("Device & app"))
-            addView(device)
-        })
-
-        // engine
-        engineText = activity.monoText("", 10f)
-        body.addView(activity.card {
-            addView(activity.titleText("Engine (UML)"))
-            addView(engineText)
-            val row = activity.row().apply { setPadding(activity.dpi(12), 0, activity.dpi(12), activity.dpi(10)) }
-            row.addView(activity.actionButton("Re-probe").apply {
-                setOnClickListener {
-                    activity.lifecycleScope.launch {
-                        withContext(Dispatchers.IO) { runCatching { VmController.refresh(activity) } }
-                        refreshLive()
-                    }
-                }
-            })
-            row.addView(activity.actionButton("Copy engine log").apply {
-                setOnClickListener {
-                    if (Report.copy(activity, LogStore.tail(Channel.ENGINE, 500))) toast("Engine log copied")
-                }
-            })
-            addView(row)
-        })
-
-        // self test
-        selfTestText = activity.monoText("Not run yet. Tap \"Run self-test\".", 10f)
-        body.addView(activity.card {
-            addView(activity.titleText("Self-test"))
-            addView(selfTestText)
-            val row = activity.row().apply { setPadding(activity.dpi(12), 0, activity.dpi(12), activity.dpi(10)) }
-            row.addView(activity.actionButton("Run self-test").apply {
-                setOnClickListener { runSelfTest() }
-            })
-            row.addView(activity.actionButton("Copy result").apply {
-                setOnClickListener {
-                    val text = lastSelfTest ?: selfTestText.text.toString()
-                    if (Report.copy(activity, text)) toast("Self-test copied")
-                }
-            })
-            addView(row)
-        })
-
-        // logs
-        logText = activity.monoText("", 9f)
-        logScroll = ScrollView(activity).apply {
-            addView(logText)
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                activity.dpi(260)
-            )
+        // ---- log panel -----------------------------------------------------
+        logView = activity.monoText("", 10.5f).apply {
+            setPadding(activity.dpi(12), activity.dpi(8), activity.dpi(12), activity.dpi(12))
         }
-        channelSpinner = Spinner(activity).apply {
-            adapter = ArrayAdapter(
-                activity,
-                android.R.layout.simple_spinner_dropdown_item,
-                Channel.entries.map { it.label }
-            )
-            onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-                override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
-                    channel = Channel.entries[position]
-                    refreshLive()
-                }
+        logScroll = ScrollView(activity).apply {
+            addView(logView)
+            setBackgroundColor(activity.color(R.color.surface))
+        }
+        val panel = activity.card {
+            setPadding(0, activity.dpi(6), 0, activity.dpi(6))
+            addView(logScroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, activity.dpi(360)))
+        }
+        col.addView(panel, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
 
-                override fun onNothingSelected(parent: AdapterView<*>?) {}
+        // ---- secondary actions ---------------------------------------------
+        val actions = activity.row().apply { setPadding(activity.dpi(6), activity.dpi(2), activity.dpi(6), activity.dpi(8)) }
+        actions.addView(activity.tonalButton("Self-test").apply { setOnClickListener { runSelfTest() } })
+        actions.addView(activity.tonalButton("Share").apply {
+            setOnClickListener { runCatching { Report.shareText(activity, buildReport()) } }
+        })
+        actions.addView(activity.tonalButton("ZIP").apply { setOnClickListener { saveZip() } })
+        actions.addView(activity.tonalButton("Issue").apply { setOnClickListener { newIssue() } })
+        actions.addView(activity.tonalButton("Clear").apply {
+            setOnClickListener {
+                LogStore.clearAll()
+                lastRendered = ""
+                renderLogs()
+                toast("Logs cleared")
+            }
+        })
+        actions.addView(activity.tonalButton("Host shell").apply { setOnClickListener { openHostShell() } })
+        for (i in 0 until actions.childCount) {
+            (actions.getChildAt(i).layoutParams as? LinearLayout.LayoutParams)?.let { lp ->
+                lp.setMargins(activity.dpi(3), 0, activity.dpi(3), 0)
             }
         }
-        liveSwitch = SwitchCompat(activity).apply {
-            text = "Live"
-            textSize = 11f
-            isChecked = true
-            setPadding(activity.dpi(8), 0, activity.dpi(8), 0)
-        }
-
-        body.addView(activity.card {
-            addView(activity.titleText("Logs"))
-            val row = activity.row().apply { setPadding(activity.dpi(8), 0, activity.dpi(8), 0) }
-            row.addView(channelSpinner)
-            row.addView(liveSwitch)
-            row.addView(activity.actionButton("Copy log").apply {
-                setOnClickListener {
-                    if (Report.copy(activity, LogStore.tail(channel, 1000))) toast("${channel.label} log copied")
-                }
-            })
-            row.addView(activity.actionButton("Clear").apply {
-                setOnClickListener {
-                    LogStore.clearAll()
-                    refreshLive()
-                    toast("Logs cleared")
-                }
-            })
-            addView(row)
-            addView(logScroll)
-        })
-
-        body.addView(activity.spacer(24))
-
-        val bodyScroll = ScrollView(activity).apply { addView(body) }
-        col.addView(bodyScroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
-
-        col.addView(
-            activity.monoText(
-                "Everything above is local. Nothing is uploaded unless you tap Share / New issue.",
-                9f
-            )
-        )
+        col.addView(activity.hScroll(actions))
 
         root = col
+        renderLogs()
     }
 
-    fun start() {
-        started = true
-        runCatching { showPendingCrash() }
-        runCatching { refreshLive() }
+    fun refresh() {
+        if (!root.isAttachedToWindow) return
+        runCatching { renderLogs() }
         handler.removeCallbacks(ticker)
-        handler.postDelayed(ticker, 600)
+        handler.postDelayed(ticker, 1500)
     }
 
-    fun stop() {
-        started = false
-        handler.removeCallbacks(ticker)
+    // ---- rendering --------------------------------------------------------
+
+    private fun addChannelButton(parent: LinearLayout, label: String, ch: Channel?) {
+        val b = activity.tonalButton(label).apply {
+            textSize = 12f
+            minHeight = activity.dpi(38)
+            setOnClickListener {
+                channel = ch
+                styleChannels()
+                lastRendered = ""
+                renderLogs()
+            }
+        }
+        channelButtons.add(b to ch)
+        parent.addView(b, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, activity.dpi(38)).apply {
+            setMargins(activity.dpi(3), 0, activity.dpi(3), 0)
+        })
     }
 
-    // ---- actions -----------------------------------------------------------
+    private fun styleChannels() {
+        channelButtons.forEach { (b, ch) ->
+            if (ch == channel) {
+                b.backgroundTintList = android.content.res.ColorStateList.valueOf(activity.color(R.color.red))
+                b.setTextColor(activity.color(R.color.on_red))
+            } else {
+                b.backgroundTintList = android.content.res.ColorStateList.valueOf(activity.color(R.color.surface_2))
+                b.setTextColor(activity.color(R.color.on_surface_2))
+            }
+        }
+    }
+
+    private fun renderLogs() {
+        styleChannels()
+        val text = when (val ch = channel) {
+            null -> buildReport()
+            else -> LogStore.tail(ch, 600).ifEmpty { "(no ${ch.label} log yet)" }
+        }
+        val trimmed = if (text.length > 60_000) text.takeLast(60_000) else text
+        if (trimmed == lastRendered) return
+        val atBottom = !logScroll.canScrollVertically(1)
+        lastRendered = trimmed
+        logView.text = trimmed
+        if (atBottom) logScroll.post { logScroll.fullScroll(View.FOCUS_DOWN) }
+        showPendingCrash()
+    }
 
     private fun buildReport(): String = runCatching {
         Report.full(activity, lastSelfTest)
-    }.getOrElse { "report failed: ${it.javaClass.simpleName}: ${it.message}\n\n" + LogStore.fullText().take(20000) }
+    }.getOrElse {
+        "report failed: ${it.javaClass.simpleName}: ${it.message}\n\n" + LogStore.fullText().take(20000)
+    }
 
-    private fun copyAll() {
+    private fun showPendingCrash() {
+        val pending = LogStore.pendingCrash()
+        if (pending.isNullOrBlank()) {
+            crashCard.visibility = View.GONE
+        } else {
+            crashText.text = pending.takeLast(2500)
+            crashCard.visibility = View.VISIBLE
+        }
+    }
+
+    // ---- actions ----------------------------------------------------------
+
+    private fun copyEverything() {
         val text = buildReport()
         if (Report.copy(activity, text)) {
-            toast("Full report copied (${text.length} chars) — paste it into the issue")
+            toast("Copied ${text.length} chars — paste it into the issue")
         } else {
-            toast("Clipboard unavailable — use Save ZIP instead")
+            toast("Clipboard unavailable — use ZIP instead")
         }
     }
 
@@ -268,35 +245,77 @@ class DebugScreen(private val activity: AppCompatActivity) {
     }
 
     private fun runSelfTest() {
-        selfTestText.text = "running…"
+        toast("Running self-test…")
         activity.lifecycleScope.launch {
-            val result = withContext(Dispatchers.IO) { runCatching { SelfTest.run(activity) }.getOrElse { "self-test failed: ${it}" } }
+            val result = withContext(Dispatchers.IO) {
+                runCatching { SelfTest.run(activity) }.getOrElse { "self-test failed: ${it.javaClass.simpleName}: ${it.message}" }
+            }
             lastSelfTest = result
-            selfTestText.text = result
-            toast("Self-test finished")
+            showSelfTestDialog(result)
+            renderLogs()
         }
     }
 
-    // ---- live refresh ------------------------------------------------------
-
-    private fun refreshLive() {
-        engineText.text = VmController.statusText()
-        if (liveSwitch.isChecked) {
-            val atBottom = logScroll.canScrollVertically(1).not()
-            logText.text = LogStore.tail(channel, 250).ifEmpty { "(no ${channel.label} log yet)" }
-            if (atBottom) logScroll.post { logScroll.fullScroll(View.FOCUS_DOWN) }
-        }
-        showPendingCrash()
+    private fun showSelfTestDialog(text: String) {
+        val view = activity.column()
+        view.addView(
+            activity.monoText(text, 10f).apply {
+                setPadding(activity.dpi(14), activity.dpi(10), activity.dpi(14), activity.dpi(6))
+            }
+        )
+        val dialog = MaterialAlertDialogBuilder(activity)
+            .setTitle("Self-test")
+            .setView(ScrollView(activity).apply { addView(view) })
+            .setPositiveButton("Copy") { _, _ ->
+                if (Report.copy(activity, text)) toast("Self-test copied")
+            }
+            .setNegativeButton("Close", null)
+            .create()
+        dialog.show()
     }
 
-    private fun showPendingCrash() {
-        val pending = LogStore.pendingCrash()
-        if (pending.isNullOrBlank()) {
-            crashCard.visibility = View.GONE
-        } else {
-            crashText.text = pending.takeLast(4000)
-            crashCard.visibility = View.VISIBLE
+    private fun openHostShell() {
+        val home = File(activity.filesDir, "home").apply { mkdirs() }
+        val col = activity.column().apply { setPadding(activity.dpi(8), activity.dpi(8), activity.dpi(8), 0) }
+        val output = activity.monoText("", 10.5f)
+        val shell = ShellSession(home) { line ->
+            activity.runOnUiThread {
+                output.append(if (output.text.isEmpty()) line else "\n$line")
+                LogStore.log(Channel.SHELL, line)
+            }
         }
+        val scroll = ScrollView(activity).apply { addView(output) }
+        col.addView(scroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, activity.dpi(280)))
+
+        val input = EditText(activity).apply {
+            hint = "host command"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            setSingleLine()
+            textSize = 12f
+        }
+        col.addView(input)
+        col.addView(
+            activity.bodyText("Host shell runs /system/bin/sh as the app uid (no root, no pty).", 11f)
+        )
+
+        input.setOnEditorActionListener { _, _, _ ->
+            val cmd = input.text.toString().trim()
+            if (cmd.isNotEmpty()) {
+                output.append("\n$ $cmd")
+                shell.exec(cmd)
+                input.setText("")
+            }
+            true
+        }
+
+        shell.start()
+        val dialog = MaterialAlertDialogBuilder(activity)
+            .setTitle("Host shell (diagnostic)")
+            .setView(col)
+            .setNegativeButton("Close", null)
+            .create()
+        dialog.setOnDismissListener { shell.stop() }
+        dialog.show()
     }
 
     private fun toast(message: String) {

@@ -7,7 +7,9 @@ import android.content.Intent
 import android.net.Uri
 import androidx.core.content.FileProvider
 import com.aiattempt.debroid.log.LogStore
+import com.aiattempt.debroid.sys.DeviceSupport
 import com.aiattempt.debroid.sys.SysInfo
+import com.aiattempt.debroid.vm.VmManager
 import java.io.File
 import java.io.FileOutputStream
 import java.net.URLEncoder
@@ -28,9 +30,16 @@ object Report {
         appendLine("repo: https://github.com/$REPO")
         appendLine()
         appendLine(SysInfo.report(ctx))
+        appendLine("--- Support ---")
+        runCatching { appendLine(DeviceSupport.summary(ctx)) }
         if (!selfTest.isNullOrBlank()) {
             appendLine("--- Self-test ---")
             appendLine(selfTest)
+        }
+        val consoles = runCatching { VmManager.consoleDump(ctx) }.getOrDefault("")
+        if (consoles.isNotBlank()) {
+            appendLine("--- VM consoles ---")
+            appendLine(consoles)
         }
         appendLine("--- Logs ---")
         runCatching {

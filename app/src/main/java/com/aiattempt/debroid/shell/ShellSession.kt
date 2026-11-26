@@ -1,13 +1,17 @@
 package com.aiattempt.debroid.shell
 
+import java.io.File
 import java.io.OutputStream
 
 /**
- * Minimal line-oriented interactive shell (`/system/bin/sh -i`) running as the app
- * uid. No pty, so no job control — good enough to inspect the device while the
- * real UML console lands. Output is ANSI-stripped before it reaches the UI.
+ * Minimal line-oriented host shell (`/system/bin/sh -i`) running as the app uid.
+ * No pty, so no job control. It now starts in a directory the app can actually
+ * read and with a sane prompt, instead of `/` ("ls: .: Permission denied").
  */
-class ShellSession(private val onLine: (String) -> Unit) {
+class ShellSession(
+    private val workDir: File? = null,
+    private val onLine: (String) -> Unit
+) {
 
     @Volatile
     var running: Boolean = false
@@ -22,9 +26,21 @@ class ShellSession(private val onLine: (String) -> Unit) {
     fun start(): Boolean {
         if (running) return true
         return try {
-            val p = ProcessBuilder("/system/bin/sh", "-i")
+            val dir = (workDir ?: File("/data/local/tmp")).let { d ->
+                if (!d.exists()) d.mkdirs()
+                d.takeIf { it.isDirectory } ?: File("/")
+            }
+            val builder = ProcessBuilder("/system/bin/sh", "-i")
                 .redirectErrorStream(true)
-                .start()
+                .directory(dir)
+            builder.environment().apply {
+                put("HOME", dir.absolutePath)
+                put("PWD", dir.absolutePath)
+                put("PATH", "/sbin:/system/sbin:/system/bin:/system/xbin:/vendor/bin")
+                put("PS1", "debroid:\\w\\$ ")
+                put("ENV", "")
+            }
+            val p = builder.start()
             process = p
             input = p.outputStream
             running = true
@@ -44,7 +60,7 @@ class ShellSession(private val onLine: (String) -> Unit) {
                 isDaemon = true
                 start()
             }
-            onLine("shell started (uid ${android.os.Process.myUid()})")
+            onLine("host shell started (uid ${android.os.Process.myUid()}) in ${dir.absolutePath}")
             true
         } catch (t: Throwable) {
             onLine("failed to start shell: ${t.javaClass.simpleName}: ${t.message}")

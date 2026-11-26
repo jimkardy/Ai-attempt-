@@ -37,7 +37,21 @@ jobs:
           echo "$SDK/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
           # `yes |` exits 141 via SIGPIPE when sdkmanager stops reading; that must not fail the step.
           ( yes || true ) | "$SDK/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
-          "$SDK/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$SDK" "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+          "$SDK/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$SDK" "platform-tools" "platforms;android-35" "build-tools;35.0.0" "ndk;27.0.12077973"
+
+      # Debroid is arm64-v8a only. This tiny marker library is what makes Android
+      # refuse to install the APK on 32-bit / x86 / x86_64 phones.
+      - name: Build the arm64 ABI gate
+        run: |
+          set -euo pipefail
+          SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          NDK="$SDK/ndk/27.0.12077973"
+          test -d "$NDK"
+          mkdir -p app/src/main/jniLibs/arm64-v8a
+          "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang" \
+            -shared -fPIC -O2 -Wl,-z,max-page-size=16384 \
+            -o app/src/main/jniLibs/arm64-v8a/libdebroid-abi.so native/abi-gate/abi_gate.c
+          ls -l app/src/main/jniLibs/arm64-v8a/
 
       - name: Build debug APK
         run: |
@@ -54,7 +68,12 @@ jobs:
           echo "== APK: $APK ($(stat -c%s "$APK") bytes)"
           "$BT/apksigner" verify --verbose --print-certs "$APK"
           "$BT/zipalign" -c -v 4 "$APK" > /dev/null && echo "ZIPALIGN_OK"
-          "$BT/aapt2" dump badging "$APK" | grep -E "package:|sdkVersion|targetSdkVersion|native-code|application-label:" || true
+          BADGING="$("$BT/aapt2" dump badging "$APK")"
+          echo "$BADGING" | grep -E "package:|sdkVersion|targetSdkVersion|native-code|application-label:" || true
+          # Enforce the support contract: arm64 only, Android 10 floor.
+          echo "$BADGING" | grep -q "native-code: 'arm64-v8a'" || { echo "MISSING arm64-v8a native code: APK would install on unsupported CPUs"; exit 1; }
+          echo "$BADGING" | grep -q "sdkVersion:'29'" || { echo "minSdk is not 29"; exit 1; }
+          echo "ABI_GATE_OK"
           sha256sum "$APK" | tee apk.sha256
 
       - name: Upload artifact
@@ -67,24 +86,32 @@ jobs:
       - name: Publish pre-release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: debug-v0.1.1
+          tag_name: debug-v0.2.0
           target_commitish: ${{ github.sha }}
-          name: Debroid 0.1.1 - debug build (install and test)
+          name: Debroid 0.2.0 - debug build (install and test)
           prerelease: true
           files: |
             app/build/outputs/apk/debug/*.apk
             apk.sha256
           body: |
-            **Debug build - install and test.** Not stable, not finished: this build has no Debian
-            guest yet, it is the diagnostics shell. MIT licensed.
+            **Debug build - install and test.** Not stable, not finished: the VM manager is real,
+            the Debian guest is not bundled yet. MIT licensed.
+
+            **arm64-v8a only, Android 10-15.** 32-bit, x86 and x86_64 phones are refused at install.
 
             Install: download the APK, allow "install unknown apps" for your browser/file manager,
             tap it. It is signed with the repo's throwaway test key, so newer debug builds install
             over this one without uninstalling.
 
-            If anything goes wrong: open the app's **Debug** tab, tap **Copy everything** and paste
-            it into an issue here. If the app will not open at all, the crash is saved and shown on
-            the next launch.
+            What is new in 0.2.0:
+            - VM tab is the home page: create up to 2 VMs, docker-style cards, start/stop/restart/delete
+            - create form is bounded by the device: cores up to the CPU count, RAM by free memory,
+              disk by free storage - no unlimited values, no free-text sizes
+            - one VM runs at a time; starting a second stops the first
+            - Terminal tab: Start button when idle, live guest console when running
+            - Debug tab: one panel with all logs and a big COPY EVERYTHING button at the top
 
-            What is in this build: diagnostics shell (Debug tab, crash capture, self-test, host
-            shell terminal, persisted logs). The UML/Debian engine is not bundled yet.
+            Pressing Start without the kernel bundled reports exactly what is missing instead of
+            pretending to boot. arm64 UML kernel + Debian rootfs are the next milestone.
+
+            If anything goes wrong: Debug tab -> **Copy everything** -> paste it into an issue here.
