@@ -45,7 +45,7 @@ object VmImage {
     fun baseImage(ctx: Context): File = File(dir(ctx), "base-rootfs.ext4")
 
     fun url(): String =
-        "https://github.com/jimkardy/Ai-attempt-/releases/download/" +
+        "https://github.com/${BuildConfig.RELEASE_REPO}/releases/download/" +
             "debug-v${BuildConfig.VERSION_NAME}/$ASSET"
 
     fun isReady(ctx: Context): Boolean {

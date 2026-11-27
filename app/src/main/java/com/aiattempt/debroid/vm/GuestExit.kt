@@ -44,9 +44,12 @@ object GuestExit {
      */
     fun captureTombstones(): List<String> {
         val found = ArrayList<String>()
+        // `--uid` keeps the snapshot inside this app: the crash buffer holds
+        // every process on the phone, and only our own uid (the app and the UML
+        // kernel process it spawned) is any of our business.
+        val uid = android.os.Process.myUid()
         val commands = listOf(
-            arrayOf("logcat", "-b", "crash", "-d", "-v", "threadtime", "-t", "400"),
-            arrayOf("logcat", "-b", "main", "-d", "-v", "threadtime", "-t", "1500")
+            arrayOf("logcat", "-b", "crash", "-d", "--uid=$uid", "-v", "threadtime", "-t", "400")
         )
         for (command in commands) {
             runCatching {
@@ -177,8 +180,8 @@ object GuestExit {
                 appendLine("blocked call : not named by logcat — the tombstone had rotated away or " +
                     "crash_dump could not attach")
             }
-            appendLine("userspace    : ptrace (the kernel's seccomp mode cannot install its own filter " +
-                "in an Android app: the seccomp() syscall is itself trapped)")
+            appendLine("userspace    : seccomp=on (in-process trapping), with one automatic retry in the " +
+                "ptrace userspace if this Android build refuses it")
             if (lines.isEmpty()) {
                 appendLine("logcat traps : none captured (nothing mentions SIGSYS/seccomp)")
             } else {

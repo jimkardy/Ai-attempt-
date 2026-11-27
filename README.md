@@ -5,10 +5,9 @@ no root, no emulator, no `proot`.
 
 > ## ⚠️ NOT DONE. NOT STABLE. DO NOT TRUST IT WITH ANYTHING.
 >
-> 0.3.0 boots a real Linux kernel: the APK ships the arm64 UML kernel and a Debian 13 (trixie)
-> arm64 disk image is attached to the same `debug-v*` release, so **Start really starts a guest**.
-> It is still early: one guest CPU, no guest networking yet, no SSH yet, and nothing has been
-> tested by anyone but its author. Expect breakage.
+> Start runs a real Linux kernel as an ordinary app process and boots a Debian 13 (trixie) arm64
+> disk attached to the same `debug-v*` release. It is still early: one guest CPU, no guest
+> networking, no SSH, and nothing has been tested beyond one family of phones. Expect breakage.
 
 ## Supported devices — arm64 only, Android 10–15
 
@@ -16,37 +15,35 @@ no root, no emulator, no `proot`.
 |---|---|---|
 | CPU | **arm64-v8a only** (`aarch64`). 32-bit ARM, x86 and x86_64 are **not** supported and the APK refuses to install on them. |
 | Android | **10 to 15** (API 29–35). Newer versions install but are untested. |
-| Kernel | must be able to run User-Mode Linux. 4 KB and 16 KB page sizes are both handled; the Debug tab reports a best-effort `uml capability` line for your phone. |
+| Kernel | must be able to run User-Mode Linux. 4 KB page sizes are the tested path; 16 KB is untested. The Debug tab reports a best-effort `uml capability` line for your phone. |
 | RAM | 2 GB minimum (3 GB+ recommended) |
 | Storage | 6 GB free minimum (the Debian image itself is ~2 GB before compression) |
 | Network | needed once, on the first Start, to fetch the Debian image |
 
-## Changes in 0.3.1
+## Changes in 0.4.0
 
-- Pressing Start on a VM that has no disk image yet now hands the console to that VM immediately, so
-  the Terminal tab shows the Debian image download instead of "No VM is running".
-- Stop (or deleting the VM) during that download cancels it, and the guest no longer boots
-  afterwards without being asked.
+- **The boot failure is fixed at its cause.** 0.3.4 always died at the last startup line,
+  `Run /sbin/debroid-init as init process`, with exit 159. That is exactly where UML calls
+  `personality()` before handing over to the guest init — and Android's app seccomp policy traps
+  that call with `SECCOMP_RET_TRAP` and `force_sig_info`, so no signal handler and no ptrace can
+  intercept it. The APK now ships the arm64 UML kernel build that other Android projects use to
+  boot real guests: same kernel source, plus the patches that skip the `personality()` re-exec path
+  under Android, load the SKAS stub with a plain `execve()` (Android refuses memfd exec), and
+  neuter the `set_robust_list`/`rseq`/`close_range` syscall sites that the app policy force-kills.
+  CI now **fails the build** if an unpatched one of those sites is in the binary.
+- **Two userspaces, one automatic retry.** Start uses `seccomp=on` (in-process syscall trapping).
+  If a particular Android build refuses it with SIGSYS during startup, the VM is relaunched once in
+  the `ptrace` userspace, which the sandbox always allows but which is slower. The console says
+  which one is running.
+- **Log capture is limited to this app.** It used to run `logcat -b all` — every app and system
+  service on the phone. It is now filtered with `--uid=<our uid>`, so only Debroid's own processes,
+  including the UML kernel process it spawns, can appear in the log panel, the report or a ZIP.
+- **Nothing personal is baked into published files.** The app no longer hard-codes a repository
+  path, and the debug report no longer includes one; the release location is supplied at build time.
+  The Debug tab's bottom button runs the self-test, copies the report and opens the share sheet —
+  it does not contact GitHub.
 
-## Changes in 0.3.0
-
-- **VMs boot.** The arm64 UML kernel (`zalexdev/linux-um-arm64`, GPL-2.0, pinned commit
-  `a528aeed4c28`) is now inside the APK; Start runs a real Linux kernel as an ordinary app
-  process — no root, no `/dev/kvm`, no hypervisor.
-- **Debian disk image**: every new VM is cloned from a Debian 13 (trixie) arm64 ext4 image that is
-  published with the APK and fetched once, on the first Start. The guest grows the filesystem to
-  the disk size you reserved, at boot.
-- **Edit button**: a small gear at the top right of each VM card opens an editor for name, cores,
-  RAM, disk and port forwards — same device-bounded controls as the create form.
-- **Reclaim Android storage** in that editor: runs `fstrim -v /` and clears Debroid's own caches,
-  and reports exactly what Android answered (see the honest note below).
-- **Much more logging**: the Engine channel records the full kernel argv, the artefacts and their
-  sizes, the image download and the guest exit code.
-- **Logs are capped at 100 MB** across the whole log directory; rotated files are dropped first.
-- Every release now carries **the code too**: the tag's source archive *is* the code the APK was
-  built from, plus `NOTICE.md` with the kernel commit and the SHA-256 of every pinned binary.
-
-## What works in 0.3.0
+## What works
 
 | Feature | State |
 |---|---|
@@ -54,7 +51,7 @@ no root, no emulator, no `proot`.
 | Create VM with device-bounded cores / RAM / disk + port forwards | ✅ |
 | Edit an existing VM (gear) with the same bounds; disk can only grow | ✅ |
 | Hard limits: 2 VMs max, one running at a time, resources validated against free RAM/storage | ✅ |
-| Real boot: arm64 UML kernel + Debian trixie ext4 disk on `ubd0` | ✅ (single guest CPU; unverified networking) |
+| Real boot: arm64 UML kernel + Debian trixie ext4 disk on `ubd0` | ✅ (single guest CPU) |
 | Terminal tab: Start button when idle, live guest console and an input line when running | ✅ |
 | Debug tab: one log panel, **COPY EVERYTHING** at the top, self-test, host shell, crash capture | ✅ |
 | Guest networking, SSH and port forwards actually doing something | ❌ next milestone |
@@ -80,8 +77,8 @@ Each release contains:
 | `apk.sha256` | its checksum |
 | `debroid-rootfs-trixie-arm64.ext4.gz` | the Debian image the VMs are cloned from |
 | `rootfs.sha256` | its checksum |
-| `NOTICE.md` | where the kernel came from (commit + hashes) and its licence |
-| *Source code (zip/tar.gz)* | GitHub's archive of the tag — the code this APK was built from |
+| `NOTICE.md` | where the kernel came from (build, patches, hashes) and its licence |
+| *Source code (zip/tar.gz)* | the archive of the tag — the code this APK was built from |
 
 ## Install a debug build
 
@@ -111,9 +108,8 @@ Restart, Stop and Copy log. The first Start of a new VM also downloads the Debia
 progress in the console.
 
 **Debug tab** — one panel with every log and a **COPY EVERYTHING** button at the top (device,
-support, UML artefacts, VM consoles, every channel, a `--- seccomp ---` section). At the bottom there
-is one button for everyone else: **Having issues? Send the report to our team on GitHub** — it runs
-the self-test, copies the full report and opens a new issue with it.
+support, UML artefacts, VM consoles, every channel, a `--- seccomp ---` section). At the bottom is
+one button that runs the self-test, copies the report and opens the share sheet.
 
 ### About "Trim this VM's disk"
 
@@ -126,29 +122,39 @@ default and turns each guest discard into a hole punch on `disk.img`, which is w
 the space again. The box reports Android's real usage of that disk before and after (`st_blocks`), and
 also clears Debroid's own caches and interrupted downloads.
 
+## Privacy
+
+- Logcat is read with `--uid=<this app's uid>`, not the default firehose: other apps' and the
+  system's log lines never enter Debroid's logs.
+- The debug report contains hardware/kernel facts (useful for diagnosing a failed boot) and nothing
+  that identifies an account. Copying it and sharing it is always an explicit action; the app does
+  not upload anything by itself.
+- The build contains no publisher account name: the release location is passed in at build time.
+
 ## Build
 
 ```bash
-# JDK 17 + Android SDK (platform 35, build-tools 35.0.0)
+# JDK 17 + Android SDK (platform 35, build-tools 35.0.0, NDK 27)
 echo "sdk.dir=/path/to/android-sdk" > local.properties
-./gradlew assembleDebug
+./gradlew assembleDebug -PdebroidReleaseRepo=<owner>/<repo>
 ```
 
 CI (`.github/workflows/debug-build.yml`) does the rest on every push to `debugging`:
 
-1. builds the tiny `native/abi-gate/abi_gate.c` marker into `lib/arm64-v8a/libdebroid-abi.so`
-   (this is what makes the APK refuse other ABIs),
-2. downloads the pinned UML kernel and stub helper, verifying their SHA-256,
+1. builds the static guest init (`native/init/debroid-init.c`) and the tiny
+   `native/abi-gate/abi_gate.c` marker into `lib/arm64-v8a/libdebroid-abi.so` (this is what makes
+   the APK refuse other ABIs),
+2. downloads the pinned UML kernel and stub helper, verifies their SHA-256, strips the kernel's
+   debug info and **gates the result**: static, AArch64, and no unpatched seccomp-killed syscall
+   sites,
 3. builds the APK and checks it with `apksigner` / `zipalign` / `aapt2`, including that the kernel
    is really inside,
-4. builds the guest init (`native/init/debroid-init.c`) as a static aarch64 binary with the same
-   pinned NDK, and verifies it has no interpreter,
-5. builds the Debian trixie arm64 ext4 image on an arm64 runner with `debootstrap`, installing that
+4. builds the Debian trixie arm64 ext4 image on an arm64 runner with `debootstrap`, installing that
    exact init as `/sbin/debroid-init`,
-6. publishes both, plus the init, checksums and `NOTICE.md`, as the `debug-v<version>` pre-release.
+5. publishes both, plus the init, checksums and `NOTICE.md`, as the `debug-v<version>` pre-release.
 
->A local build without the NDK produces an APK with no native library, so it is not ABI-gated and
->has no kernel. Only the CI-published APK carries both.
+> A local build without the NDK produces an APK with no native library, so it is not ABI-gated and
+> has no kernel. Only the CI-published APK carries both.
 
 ## Roadmap
 
@@ -157,14 +163,14 @@ CI (`.github/workflows/debug-build.yml`) does the rest on every push to `debuggi
 3. **0.2.1** — VM tab renders on launch, create form no longer crashes, create button greys out. ✅
 4. **0.3.0** — real boot: arm64 UML kernel + Debian trixie ext4 disk, per-VM edit sheet with storage
    reclaim, 100 MB log budget. ✅
-5. **0.3.2** — static guest init, growable disk, trim inside the guest, exit-code diagnosis,
-   one-button GitHub report. ✅
-6. **0.3.3** — a debug field for extra kernel parameters. ✅ (its `seccomp=on` switch cannot work:
-   Android traps the `seccomp()` syscall an app would need to install that filter.)
-7. **0.3.4** — the kernel runs in the ptrace userspace again, and the report now names the exact
-   syscall Android refuses, read from logcat's `crash` buffer before it rotates. 🔄
-8. **0.4.0** — guest networking (`umnet`/`passt`), SSH, and the port forwards actually forwarding.
-9. **0.5.0** — rolling "always latest Debian" rootfs updates on the `updates` branch, and building
+5. **0.3.2** — static guest init, growable disk, trim inside the guest, exit-code diagnosis. ✅
+6. **0.3.3/0.3.4** — extra kernel parameters field; diagnosis of the sandbox's SIGSYS deaths
+   (exit 159) and the `crash`-buffer tombstone reader. ✅
+7. **0.4.0** — the Android-compatible kernel build (the `personality()` re-exec fix), automatic
+   `seccomp=on` → `ptrace` fallback, log capture limited to this app, no personal traces in
+   published files. 🔄
+8. **0.5.0** — guest networking (`umnet`/`passt`), SSH, and the port forwards actually forwarding.
+9. **0.6.0** — rolling "always latest Debian" rootfs updates on the `updates` branch, and building
    the kernel from source in this repository's own CI.
 
 ## Licence
@@ -173,9 +179,12 @@ CI (`.github/workflows/debug-build.yml`) does the rest on every push to `debuggi
 
 Third-party notes:
 
-- The UML kernel is from [`zalexdev/linux-um-arm64`](https://github.com/zalexdev/linux-um-arm64),
-  commit `a528aeed4c28`, and is **GPL-2.0**. Kernel binaries and patches stay GPL-2.0 even though
-  the app code is MIT. Exact files and SHA-256s: [`native/uml/NOTICE.md`](native/uml/NOTICE.md).
+- The UML kernel is GPL-2.0. The APK ships the pinned `uml-guest-11` bionic build from
+  [`GlassOnTin/uml-transport`](https://github.com/GlassOnTin/uml-transport), whose source is the
+  `um-arm64` branch of [`zalexdev/linux-um-arm64`](https://github.com/zalexdev/linux-um-arm64)
+  plus the patches published in that transport repository. Kernel binaries and patches stay GPL-2.0
+  even though the app code is MIT. Exact files, patch list and SHA-256s:
+  [`native/uml/NOTICE.md`](native/uml/NOTICE.md).
 - The Debian image is built from Debian trixie packages in CI; Debian is its own mix of licences,
   all of them free software.
 - Podroid ([ExTV/Podroid](https://github.com/ExTV/Podroid), GPL-2.0) is **inspiration only** — no

@@ -151,9 +151,9 @@ class DebugScreen(private val activity: AppCompatActivity) {
         val sendWrap = activity.column().apply {
             setPadding(activity.dpi(12), activity.dpi(4), activity.dpi(12), activity.dpi(10))
         }
-        sendButton = activity.primaryButton("Having issues? Send the report to our team on GitHub").apply {
+        sendButton = activity.primaryButton("Having issues? Send the report").apply {
             textSize = 14f
-            setOnClickListener { sendToGithub() }
+            setOnClickListener { sendReport() }
         }
         sendWrap.addView(
             sendButton,
@@ -161,8 +161,8 @@ class DebugScreen(private val activity: AppCompatActivity) {
         )
         sendWrap.addView(
             TextView(activity).apply {
-                text = "Runs the self-test, copies the full report and opens a new GitHub issue with it. " +
-                    "Nothing leaves your phone until you press Send there."
+                text = "Runs the self-test, copies the full report and opens the share sheet, so it goes " +
+                    "wherever you choose. Nothing leaves your phone until you pick a destination."
                 textSize = 11f
                 setTextColor(activity.color(R.color.on_surface_3))
                 setPadding(activity.dpi(4), activity.dpi(6), activity.dpi(4), 0)
@@ -256,10 +256,10 @@ class DebugScreen(private val activity: AppCompatActivity) {
 
     /**
      * The one action for a normal user: run the self-test so the report is
-     * complete, copy it (so a paste is always possible) and open a new issue
-     * with the important part already filled in.
+     * complete, copy it (so a paste is always possible) and open the share
+     * sheet. Nothing is uploaded anywhere by the app itself.
      */
-    private fun sendToGithub() {
+    private fun sendReport() {
         sendButton.isEnabled = false
         sendButton.text = "Preparing the report…"
         activity.lifecycleScope.launch {
@@ -270,14 +270,12 @@ class DebugScreen(private val activity: AppCompatActivity) {
             lastSelfTest = selfTest
             val text = buildReport()
             val copied = Report.copy(activity, text)
-            val url = runCatching { Report.issueUrl(text) }
-                .getOrElse { "https://github.com/${Report.REPO}/issues/new" }
-            Report.openUrl(activity, url)
+            Report.shareText(activity, text)
             sendButton.isEnabled = true
-            sendButton.text = "Having issues? Send the report to our team on GitHub"
+            sendButton.text = "Having issues? Send the report"
             toast(
-                if (copied) "Issue opened — the full report is on your clipboard, paste it in if asked"
-                else "Issue opened — use Copy everything above to attach the details"
+                if (copied) "Report copied and ready to share"
+                else "Share sheet opened — use Copy everything above to attach the details"
             )
         }
     }

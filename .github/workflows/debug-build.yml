@@ -13,12 +13,13 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Pinned upstream arm64 UML kernel (GPL-2.0). Provenance: native/uml/NOTICE.md
-  UML_REPO: zalexdev/linux-um-arm64
-  UML_TAG: prebuilt-20260816
-  UML_COMMIT: a528aeed4c28
-  KERNEL_SHA256: 280be89df3bf6f3607fbbb993d3130399d90658c2ced13ececa1fd07dbe55845
-  STUB_SHA256: 83f51f7c45133daa135b595562b09c5e2829f1d0f1e00b7fce2a7695370781fc
+  # Pinned arm64 UML kernel (GPL-2.0). Provenance: native/uml/NOTICE.md
+  UML_REPO: GlassOnTin/uml-transport
+  UML_TAG: uml-guest-11
+  KERNEL_ASSET: libvmlinux.so
+  STUB_ASSET: libuml-stub.so
+  KERNEL_SHA256: 14d39961761cdbc9fe5478ae4881eb548d79d12720213d6b65e8385dcf6eee16
+  STUB_SHA256: 731c48d5bf42ef25e26625af6a02627a5d658bf9f67d6f7fc443d6d644d6e52e
   ROOTFS_ASSET: debroid-rootfs-trixie-arm64.ext4.gz
 
 jobs:
@@ -84,26 +85,73 @@ jobs:
             -o app/src/main/jniLibs/arm64-v8a/libdebroid-abi.so native/abi-gate/abi_gate.c
           ls -l app/src/main/jniLibs/arm64-v8a/
 
-      # The kernel itself: a static aarch64 bionic binary, exec'd straight out of
-      # nativeLibraryDir. GPL-2.0 — see native/uml/NOTICE.md for commit and hashes.
-      # Both files are verified before they are allowed into the APK.
+      # The kernel itself: a static aarch64 *bionic* build from
+      # GlassOnTin/uml-transport (GPL-2.0; source is zalexdev/linux-um-arm64 plus
+      # the uml-transport patches). This is the build that is known to boot a
+      # guest inside an Android app sandbox, and the difference is exactly what
+      # 0.3.4 died on: UML calls `personality()` when it starts the guest init,
+      # Android's app seccomp policy traps that call with SIGSYS, and the
+      # android-app-compat patch skips the re-exec path that makes it. The linked
+      # libc is also neutered for the syscalls the policy force-kills
+      # (set_robust_list, rseq, close_range).
+      # The artifact carries ~68 MB of DWARF; --strip-debug takes it to ~9 MB and
+      # keeps the loadable segment byte-identical (verified by sha256 of the
+      # ORIGINAL download above).
       - name: Fetch the pinned arm64 UML kernel
         run: |
           set -euo pipefail
           BASE="https://github.com/${UML_REPO}/releases/download/${UML_TAG}"
           DEST=app/src/main/jniLibs/arm64-v8a
-          curl -fsSL -o "$DEST/libuml-kernel-16k.so" "$BASE/linux"
-          curl -fsSL -o "$DEST/libstub_exe.so" "$BASE/stub_exe"
-          echo "${KERNEL_SHA256}  $DEST/libuml-kernel-16k.so" | sha256sum -c -
+          mkdir -p "$DEST"
+          curl -fsSL --retry 3 -o /tmp/uml-kernel-unstripped "$BASE/${KERNEL_ASSET}"
+          curl -fsSL --retry 3 -o "$DEST/libstub_exe.so" "$BASE/${STUB_ASSET}"
+          echo "${KERNEL_SHA256}  /tmp/uml-kernel-unstripped" | sha256sum -c -
           echo "${STUB_SHA256}  $DEST/libstub_exe.so" | sha256sum -c -
-          file "$DEST/libuml-kernel-16k.so" "$DEST/libstub_exe.so"
-          chmod 0755 "$DEST/libuml-kernel-16k.so" "$DEST/libstub_exe.so"
+          SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          "$SDK/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" \
+            --strip-debug -o "$DEST/libuml-kernel.so" /tmp/uml-kernel-unstripped
+          rm -f /tmp/uml-kernel-unstripped
+          chmod 0755 "$DEST/libuml-kernel.so" "$DEST/libstub_exe.so"
+          file "$DEST/libuml-kernel.so" "$DEST/libstub_exe.so"
+          readelf -h "$DEST/libuml-kernel.so" | grep -q AArch64
+          if readelf -l "$DEST/libuml-kernel.so" | grep -qi interpreter; then
+            echo "the kernel is dynamically linked; it must be static"; exit 1
+          fi
+          test "$(stat -c%s "$DEST/libuml-kernel.so")" -lt 40000000 || { echo "kernel still carries debug info"; exit 1; }
+          # Gate: a syscall site the app seccomp policy force-kills must never ship
+          # unpatched. The build fails here rather than on someone's phone.
+          python3 - "$DEST/libuml-kernel.so" <<'PY'
+          import struct, sys
+          data = open(sys.argv[1], 'rb').read()
+          n = len(data) // 4
+          words = struct.unpack_from('<%dI' % n, data, 0)
+          SVC0 = 0xD4000001
+          targets = {}
+          for num, name in ((99, 'set_robust_list'), (293, 'rseq'), (436, 'close_range')):
+              for enc in (0xD2800000 | (num << 5) | 8, 0x52800000 | (num << 5) | 8):
+                  targets[enc] = name
+          bad = {}
+          for i in range(n - 16):
+              name = targets.get(words[i])
+              if not name:
+                  continue
+              for j in range(i + 1, min(i + 16, n)):
+                  if words[j] == SVC0:
+                      bad[name] = bad.get(name, 0) + 1
+                      break
+                  if words[j] in targets:
+                      break
+          if bad:
+              sys.exit('kernel still issues a seccomp-killed syscall: %s' % bad)
+          print('app-seccomp gate: 0 unpatched svc sites')
+          PY
           ls -l "$DEST"
 
       - name: Build debug APK
         run: |
           chmod +x ./gradlew
-          ./gradlew --no-daemon --stacktrace assembleDebug
+          ./gradlew --no-daemon --stacktrace \
+            -PdebroidReleaseRepo="${{ github.repository }}" assembleDebug
 
       - name: Verify the APK is installable
         run: |
@@ -121,7 +169,7 @@ jobs:
           echo "$BADGING" | grep -q "native-code: 'arm64-v8a'" || { echo "MISSING arm64-v8a native code: APK would install on unsupported CPUs"; exit 1; }
           echo "$BADGING" | grep -q "minSdkVersion:'29'" || { echo "minSdk is not 29"; exit 1; }
           # The kernel and the stub helper must actually be inside the APK.
-          unzip -l "$APK" | grep -q "lib/arm64-v8a/libuml-kernel-16k.so" || { echo "UML kernel missing from the APK"; exit 1; }
+          unzip -l "$APK" | grep -q "lib/arm64-v8a/libuml-kernel.so" || { echo "UML kernel missing from the APK"; exit 1; }
           unzip -l "$APK" | grep -q "lib/arm64-v8a/libstub_exe.so" || { echo "UML stub helper missing from the APK"; exit 1; }
           echo "ABI_GATE_OK"
           mkdir -p dist
@@ -284,7 +332,34 @@ jobs:
 
             **arm64-v8a only, Android 10–15.** 32-bit, x86 and x86_64 phones are refused at install.
 
-            ## What is new in 0.3.4
+            ## What is new in 0.4.0
+
+            - **It should actually boot now.** 0.3.4 died at the very last startup line,
+              `Run /sbin/debroid-init as init process`, with exit 159. That is the point where
+              UML calls `personality()` before handing over to the guest init, and Android's app
+              seccomp policy traps that call with `SECCOMP_RET_TRAP` + `force_sig_info` — no
+              handler and no ptrace can save it, which is why the tombstone never appeared. The
+              APK now ships the arm64 UML kernel build that other Android projects use to boot
+              real guests (`GlassOnTin/uml-transport`, GPL-2.0, same `zalexdev/linux-um-arm64`
+              source plus three patches): it skips the `personality()` re-exec path when built
+              for Android, loads the stub with a plain `execve` (Android refuses memfd exec), and
+              has the `set_robust_list`, `rseq` and `close_range` syscall sites neutered. CI
+              verifies the stripped binary is static AArch64 and has zero unpatched
+              seccomp-killed sites before it may enter an APK.
+            - **Two userspaces, one automatic retry.** Start uses `seccomp=on` (in-process
+              syscall trapping). If this Android build refuses it with SIGSYS while starting, the
+              VM is relaunched once in the `ptrace` userspace, which the sandbox always allows but
+              which is slower. The console says which one is running.
+            - **Log capture now reads only this app.** It used to run `logcat -b all`, i.e. every
+              app and system service on the phone. It is now filtered with `--uid=<our uid>`, so
+              only Debroid's own processes (including the UML kernel process it spawns) can ever
+              appear in the log panel, the report or a ZIP.
+            - **No personal traces in published files.** The app no longer hard-codes a repository
+              path and the report no longer shows one: the release location is supplied at build
+              time. The Debug tab's bottom button now runs the self-test, copies the report and
+              opens the share sheet; it does not talk to GitHub at all.
+
+            ## What was new in 0.3.4
 
             - **`seccomp=on` is not possible in an Android app, so it is gone.** 0.3.3 got as far as
               `Checking that seccomp filters can be installed...` and then died: the port's SECCOMP

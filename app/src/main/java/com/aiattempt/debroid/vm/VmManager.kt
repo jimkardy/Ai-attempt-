@@ -74,6 +74,10 @@ object VmManager {
 
     private var process: VmProcess? = null
 
+    /** True once this start has already fallen back from seccomp=on to ptrace. */
+    @Volatile
+    private var triedPtraceFallback = false
+
     /** Called on any state change. Must be cheap; the UI refreshes from [list]. */
     @Volatile
     var onChanged: (() -> Unit)? = null
@@ -334,6 +338,7 @@ object VmManager {
 
     fun start(ctx: Context, id: String): Result<Unit> {
         ensure(ctx)
+        triedPtraceFallback = false
         var failure: Result<Unit>? = null
         synchronized(lock) {
             val vm = items.firstOrNull { it.id == id } ?: return Result.failure(
@@ -423,15 +428,22 @@ object VmManager {
     }
 
     /** Must be called with [lock] held. */
-    private fun launchLocked(ctx: Context, vm: VmInstance): Result<Unit> {
+    private fun launchLocked(
+        ctx: Context,
+        vm: VmInstance,
+        mode: SeccompMode = SeccompMode.SECCOMP
+    ): Result<Unit> {
         vm.state = VmState.STARTING
         vm.message = "Starting…"
-        appendConsole(ctx, vm, "booting the UML kernel with ${vm.ramMb} MB RAM")
+        appendConsole(ctx, vm, "booting the UML kernel with ${vm.ramMb} MB RAM (${mode.arg})")
+        val startedAt = System.currentTimeMillis()
         val launch = VmProcess.launch(
             ctx = ctx,
             vm = vm,
+            mode = mode,
             onLine = { line -> appendConsole(ctx, vm, line) },
             onExit = { code ->
+                var retryInPtrace = false
                 synchronized(lock) {
                     vm.state = if (code == 0) VmState.STOPPED else VmState.ERROR
                     vm.message = if (code == 0) "Exited cleanly" else "Guest exited with code $code"
@@ -440,6 +452,15 @@ object VmManager {
                     if (runningId == vm.id) {
                         runningId = null
                         process = null
+                    }
+                    // Some Android builds refuse the in-process seccomp userspace
+                    // outright (SIGSYS while the port is still starting). Retry once,
+                    // in the ptrace userspace the app sandbox always allows.
+                    if (code == 159 && mode == SeccompMode.SECCOMP &&
+                        !triedPtraceFallback && System.currentTimeMillis() - startedAt < 30_000
+                    ) {
+                        triedPtraceFallback = true
+                        retryInPtrace = true
                     }
                     VmStore.save(ctx, items)
                 }
@@ -456,6 +477,16 @@ object VmManager {
                     traps.forEach { line -> appendConsole(ctx, vm, "  $line") }
                 }
                 notifyChanged()
+                if (retryInPtrace) {
+                    appendConsole(
+                        ctx, vm,
+                        "this Android build refused seccomp=on — retrying once in the ptrace userspace " +
+                            "(slower, but it is the mode the app sandbox always allows)"
+                    )
+                    LogStore.log(Channel.ENGINE, "retry ${vm.name} in the ptrace userspace after exit 159")
+                    synchronized(lock) { launchLocked(ctx, vm, SeccompMode.PTRACE) }
+                    notifyChanged()
+                }
             }
         )
 

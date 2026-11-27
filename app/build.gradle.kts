@@ -12,8 +12,15 @@ android {
         // Android 10 is the floor: arm64 phones that support UML are 10+.
         minSdk = 29
         targetSdk = 35
-        versionCode = 9
-        versionName = "0.3.4"
+        versionCode = 10
+        versionName = "0.4.0"
+
+        // Where this build fetches its Debian image and points bug reports.
+        // CI passes the real repository with -PdebroidReleaseRepo; the source
+        // tree deliberately contains no account name of its own.
+        val releaseRepo = (project.findProperty("debroidReleaseRepo") as String?)
+            ?.takeIf { it.isNotBlank() } ?: "debroid-releases/debroid"
+        buildConfigField("String", "RELEASE_REPO", "\"$releaseRepo\"")
 
         // Debroid is arm64-v8a ONLY. The UML kernel and the Debian guest are
         // aarch64; a 32-bit or x86 phone could never run them. CI drops an

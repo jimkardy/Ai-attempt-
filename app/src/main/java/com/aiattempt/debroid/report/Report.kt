@@ -15,7 +15,6 @@ import com.aiattempt.debroid.vm.VmManager
 import com.aiattempt.debroid.vm.VmProcess
 import java.io.File
 import java.io.FileOutputStream
-import java.net.URLEncoder
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -25,12 +24,10 @@ import java.util.zip.ZipOutputStream
 /** Builds the copy-and-paste artifacts users send back: full report, log zip, issue link. */
 object Report {
 
-    const val REPO = "jimkardy/Ai-attempt-"
     private const val LOG_LIMIT = 90_000
 
     fun full(ctx: Context, selfTest: String? = null): String = buildString {
         appendLine("===== Debroid debug report =====")
-        appendLine("repo: https://github.com/$REPO")
         appendLine()
         appendLine(SysInfo.report(ctx))
         appendLine("--- Support ---")
@@ -123,20 +120,5 @@ object Report {
         }
     }
 
-    /** Pre-filled GitHub issue. Bodies are truncated so the URL stays usable. */
-    fun issueUrl(text: String): String {
-        // GitHub's editor is a browser URL: keep it short enough to open everywhere.
-        val limit = 1800
-        val body = if (text.length > limit) text.take(limit) + "\n\n...[truncated - paste the ZIP contents or the full copied report]" else text
-        val title = URLEncoder.encode("Bug report (debug build)", "UTF-8")
-        val encoded = URLEncoder.encode(body, "UTF-8")
-        return "https://github.com/$REPO/issues/new?title=$title&body=$encoded"
-    }
 
-    fun openUrl(ctx: Context, url: String) {
-        try {
-            ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-        } catch (_: Throwable) {
-        }
-    }
 }

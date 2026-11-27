@@ -14,14 +14,31 @@ import java.io.OutputStream
  * the guest console to the VM's console log and reports the exit code back.
  *
  * The kernel is a real Linux kernel running as an ordinary app process: no root,
- * no /dev/kvm, no hypervisor. `libuml-kernel-16k.so` is built from
- * [zalexdev/linux-um-arm64](https://github.com/zalexdev/linux-um-arm64) (GPL-2.0)
- * for 16 KB guest pages, which also runs on 4 KB hosts.
+ * no /dev/kvm, no hypervisor. It is the static bionic arm64 build published by
+ * GlassOnTin/uml-transport (GPL-2.0; source zalexdev/linux-um-arm64 plus the
+ * uml-transport patches). That build is the one that is known to boot a guest
+ * under an Android app sandbox: its android-app-compat patch skips the
+ * `personality()` re-exec UML performs when it starts the guest init, and its
+ * libc is neutered for the syscalls the app seccomp policy force-kills
+ * (`set_robust_list`, `rseq`, `close_range`).
  *
  * The guest root is the VM's own ext4 disk image (`vms/<id>/disk.img`) on UML's
  * `ubd0` block device, and `native/rootfs/debroid-init` mounts the pseudo
  * filesystems and hands the console to a shell.
  */
+/**
+ * Which userspace the kernel runs its guest in.
+ *
+ * `SECCOMP` traps and emulates the guest's syscalls in-process and is what the
+ * port is built for on Android. `PTRACE` substitutes syscall numbers through a
+ * ptrace tracer instead: much slower, but the sandbox always allows it, so it is
+ * the fallback when the in-process mode is refused on a particular Android build.
+ */
+enum class SeccompMode(val arg: String) {
+    SECCOMP("seccomp=on"),
+    PTRACE("seccomp=off")
+}
+
 class VmProcess private constructor(
     val vmId: String,
     private val process: Process,
@@ -54,6 +71,9 @@ class VmProcess private constructor(
 
     companion object {
 
+        /** The kernel shipped in the APK (one build, one file per page size). */
+        const val KERNEL = "libuml-kernel.so"
+        /** Older names, kept so an install over an old APK still finds something. */
         const val KERNEL_4K = "libuml-kernel-4k.so"
         const val KERNEL_16K = "libuml-kernel-16k.so"
         const val STUB = "libstub_exe.so"
@@ -65,7 +85,8 @@ class VmProcess private constructor(
         }
 
         private fun preferredKernelNames(): List<String> =
-            if (SysInfo.pageSizeKb() == 16) listOf(KERNEL_16K, KERNEL_4K) else listOf(KERNEL_4K, KERNEL_16K)
+            if (SysInfo.pageSizeKb() == 16) listOf(KERNEL, KERNEL_16K, KERNEL_4K)
+            else listOf(KERNEL, KERNEL_4K, KERNEL_16K)
 
         /** UML execs this helper to hold a guest address space. */
         fun stubPath(ctx: Context): File? =
@@ -74,12 +95,16 @@ class VmProcess private constructor(
         fun diskPath(ctx: Context, vm: VmInstance): File = VmStore.diskImage(ctx, vm.id)
 
         /** The exact argv, also written to the Engine log so a failure is reproducible. */
-        fun arguments(ctx: Context, vm: VmInstance): List<String> {
+        fun arguments(
+            ctx: Context,
+            vm: VmInstance,
+            mode: SeccompMode = SeccompMode.SECCOMP
+        ): List<String> {
             val kernel = kernelPath(ctx)
             val stub = stubPath(ctx)
             val disk = diskPath(ctx, vm)
             return buildList {
-                add(kernel?.absolutePath ?: "<missing $KERNEL_16K>")
+                add(kernel?.absolutePath ?: "<missing $KERNEL>")
                 add("mem=${vm.ramMb}M")
                 // No `umid`: UML names its state files after it and refused the
                 // short name ("umid_file_name : buffer too short"). Only one VM
@@ -91,13 +116,9 @@ class VmProcess private constructor(
                 add("rootfstype=ext4")
                 add("init=/sbin/debroid-init")
                 add("stub_exe=${stub?.absolutePath ?: "<missing $STUB>"}")
-                // `seccomp=on` cannot work inside an Android app: the port's
-                // SECCOMP mode installs its own BPF filter, and the `seccomp()`
-                // syscall is not in bionic's app allowlist, so Android traps it
-                // with SIGSYS. The 0.3.3 console died at "Checking that seccomp
-                // filters can be installed..." for exactly that reason. The
-                // ptrace userspace is the only mode that can run here.
-                add("seccomp=off")
+                // In-process syscall trapping by default. If this Android build
+                // refuses it, VmManager relaunches once in the ptrace userspace.
+                add(mode.arg)
                 add("con=null")
                 add("con0=fd:0,fd:1")
                 add("panic=-1")
@@ -116,6 +137,7 @@ class VmProcess private constructor(
         fun launch(
             ctx: Context,
             vm: VmInstance,
+            mode: SeccompMode,
             onLine: (String) -> Unit,
             onExit: (Int) -> Unit
         ): LaunchResult {
@@ -137,7 +159,7 @@ class VmProcess private constructor(
                 )
             }
 
-            val command = arguments(ctx, vm)
+            val command = arguments(ctx, vm, mode)
             LogStore.log(Channel.ENGINE, "launch ${vm.name}: ${command.joinToString(" ")}")
             LogStore.log(
                 Channel.ENGINE,
