@@ -155,6 +155,10 @@ jobs:
   # arm64 runner (no qemu). It is published with the APK, so the APK and the image
   # it boots always come from the same commit.
   rootfs:
+    # The image installs the guest init built by the apk job, so it must wait for
+    # that artifact to exist (upload-artifact v4 artifacts only appear when the
+    # producing job has uploaded them).
+    needs: apk
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
