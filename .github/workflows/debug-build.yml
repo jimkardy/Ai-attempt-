@@ -49,6 +49,27 @@ jobs:
           ( yes || true ) | "$SDK/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
           "$SDK/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$SDK" "platform-tools" "platforms;android-35" "build-tools;35.0.0" "ndk;27.0.12077973"
 
+      # The guest's init: a static aarch64 bionic binary. It replaces the old
+      # `#!/bin/sh` script, so the first userspace program in the guest does no
+      # glibc startup (rseq is the syscall Android's app seccomp filter traps),
+      # and it sets GLIBC_TUNABLES=glibc.pthread.rseq=0 before starting bash.
+      # It is installed into /sbin/debroid-init of the rootfs built below.
+      - name: Build the guest init (static, arm64)
+        run: |
+          set -euo pipefail
+          SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          NDK="$SDK/ndk/27.0.12077973"
+          mkdir -p dist
+          "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang" \
+            -static -O2 -s -Wall -Wextra -o dist/debroid-init native/init/debroid-init.c
+          file dist/debroid-init
+          readelf -h dist/debroid-init | grep -q "AArch64" || { echo "guest init is not aarch64"; exit 1; }
+          if readelf -l dist/debroid-init | grep -qi interpreter; then
+            echo "guest init is dynamically linked; it must be static"; exit 1
+          fi
+          test "$(stat -c%s dist/debroid-init)" -gt 100000 || { echo "guest init looks wrong"; exit 1; }
+          ( cd dist && sha256sum debroid-init > debroid-init.sha256 && cat debroid-init.sha256 )
+
       # Debroid is arm64-v8a only. This tiny marker library is what makes Android
       # refuse to install the APK on 32-bit / x86 / x86_64 phones.
       - name: Build the arm64 ABI gate
@@ -138,6 +159,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The init is compiled by the apk job (x86_64 runner, same pinned NDK) and
+      # handed over as an artifact, so the image always contains that exact binary.
+      - name: Fetch the guest init built by the apk job
+        uses: actions/download-artifact@v4
+        with:
+          name: debroid-apk
+          path: init-artifact
+
+      - name: Verify the guest init is static aarch64
+        run: |
+          set -euo pipefail
+          ls -l init-artifact
+          file init-artifact/debroid-init
+          readelf -h init-artifact/debroid-init | grep -q "AArch64"
+          if readelf -l init-artifact/debroid-init | grep -qi interpreter; then
+            echo "guest init is dynamically linked; it must be static"; exit 1
+          fi
+
       - name: Build the Debian trixie arm64 disk image
         run: |
           set -euo pipefail
@@ -145,7 +184,7 @@ jobs:
           docker run --rm \
             -e ROOTFS_ASSET="${ROOTFS_ASSET}" \
             -v "$PWD/dist:/out" \
-            -v "$PWD/native/rootfs:/rootfs-src:ro" \
+            -v "$PWD/init-artifact:/init-src:ro" \
             debian:trixie bash -euo pipefail -c '
               export DEBIAN_FRONTEND=noninteractive
               apt-get update
@@ -153,12 +192,14 @@ jobs:
               debootstrap --variant=minbase --arch=arm64 \
                 --include=iproute2,procps,e2fsprogs,less,curl,ca-certificates,nano,kmod,locales \
                 trixie /chroot http://deb.debian.org/debian
-              install -m 0755 /rootfs-src/debroid-init /chroot/sbin/debroid-init
+              install -m 0755 /init-src/debroid-init /chroot/sbin/debroid-init
               printf "debroid\n" > /chroot/etc/hostname
               printf "127.0.0.1 localhost debroid\n::1 localhost debroid\n" > /chroot/etc/hosts
               printf "nameserver 1.1.1.1\nnameserver 9.9.9.9\n" > /chroot/etc/resolv.conf
               printf "proc /proc proc defaults 0 0\nsysfs /sys sysfs defaults 0 0\ndevpts /dev/pts devpts defaults 0 0\ntmpfs /tmp tmpfs defaults 0 0\n" > /chroot/etc/fstab
               test -x /chroot/sbin/debroid-init
+              head -c 4 /chroot/sbin/debroid-init | od -An -tx1 | tr -d " \n" | grep -qx "7f454c46" \
+                || { echo "debroid-init is not an ELF binary"; exit 1; }
               test -f /chroot/etc/debian_version
               truncate -s 2G /out/base.ext4
               mke2fs -q -t ext4 -d /chroot -L debroid-root -O ^has_journal -m 0 /out/base.ext4
@@ -227,6 +268,8 @@ jobs:
             dist/apk.sha256
             dist/${{ env.ROOTFS_ASSET }}
             dist/rootfs.sha256
+            dist/debroid-init
+            dist/debroid-init.sha256
             dist/NOTICE.md
           body: |
             **Debug build — install and test.** Not stable, not finished. MIT licensed app code,
@@ -237,12 +280,36 @@ jobs:
 
             **arm64-v8a only, Android 10–15.** 32-bit, x86 and x86_64 phones are refused at install.
 
-            ## What is new in 0.3.1
+            ## What is new in 0.3.2
 
-            - Pressing Start on a VM without a disk image now hands the console to that VM at once, so
-              the Terminal tab shows the Debian image download instead of "No VM is running"; Stop or
-              Delete during the download cancels it instead of booting behind your back.
-            - Everything from 0.3.0 below.
+            - **The reason 0.3.1 did not boot is now handled.** Every Start died in ~0.4 s with exit
+              code 159 = 128 + 31 (SIGSYS): Android's app seccomp filter trapped a system call made by
+              glibc at the very first guest process. `/sbin/debroid-init` is no longer a shell script
+              but a static aarch64 binary that does no glibc startup of its own and starts bash with
+              `GLIBC_TUNABLES=glibc.pthread.rseq=0`. It is attached to this release
+              (`debroid-init` + checksum) and inside the filesystem image.
+            - Logs explain exits in words: 159 (SIGSYS/seccomp), 137 (low-memory killer), 139 (crash),
+              and the report has a new `--- seccomp ---` section with the matching logcat lines.
+            - The `umid_file_name : buffer too short` warning is gone (no `umid=` any more; only one VM
+              runs at a time and TMPDIR already isolates it).
+            - **The disk really grows.** Raising the disk slider on a stopped VM extends its sparse
+              image immediately; the guest's filesystem fills it on the next boot. The editor shows
+              reserved size, the filesystem inside it and what the disk actually costs on Android.
+            - **Trimming now happens inside the VM.** Deleting a 1 GB file inside the guest no longer
+              costs Android 1 GB: "Trim this VM's disk" runs `fstrim -v /` in the guest, UML's ubd
+              driver punches the holes into `disk.img`, and the result shows Android's real usage
+              before and after. The old host-side `fstrim /data` — which could never help — is gone.
+            - The Debug tab is simpler: **Copy everything** at the top (unchanged), and one big
+              **"Having issues? Send the report to our team on GitHub"** button at the bottom that runs
+              the self-test, copies the report and opens a new issue with it. Self-test / Share / ZIP /
+              Issue / Clear / Host shell are folded into that one button.
+            - Everything from 0.3.1 and 0.3.0 below.
+
+            ## What arrived in 0.3.1
+
+            - Pressing Start on a VM without a disk image hands the console to that VM at once, so the
+              Terminal tab shows the Debian image download; Stop or Delete during the download cancels
+              it instead of booting behind your back.
 
             ## What arrived in 0.3.0
 

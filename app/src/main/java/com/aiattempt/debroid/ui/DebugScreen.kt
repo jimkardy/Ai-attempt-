@@ -2,11 +2,8 @@ package com.aiattempt.debroid.ui
 
 import android.os.Handler
 import android.os.Looper
-import android.text.InputType
-import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
-import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -17,19 +14,17 @@ import com.aiattempt.debroid.R
 import com.aiattempt.debroid.log.Channel
 import com.aiattempt.debroid.log.LogStore
 import com.aiattempt.debroid.report.Report
-import com.aiattempt.debroid.shell.ShellSession
 import com.aiattempt.debroid.sys.SelfTest
-import com.aiattempt.debroid.vm.VmManager
 import com.google.android.material.button.MaterialButton
-import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.File
 
 /**
  * The Debug tab: one square with every log that matters, one big copy button at
- * the top. Everything is local; sharing only happens when the user asks.
+ * the top (the owner pastes it straight into a chat) and one big button at the
+ * bottom for everyone else — it runs the self-test, copies the full report and
+ * opens a GitHub issue with it. Everything is local until the user sends it.
  */
 class DebugScreen(private val activity: AppCompatActivity) {
 
@@ -39,6 +34,7 @@ class DebugScreen(private val activity: AppCompatActivity) {
     private val logScroll: ScrollView
     private val crashCard: View
     private val crashText: TextView
+    private val sendButton: MaterialButton
 
     private var channel: Channel? = null // null == ALL
     private val channelButtons = ArrayList<Pair<MaterialButton, Channel?>>()
@@ -56,7 +52,7 @@ class DebugScreen(private val activity: AppCompatActivity) {
     init {
         val col = activity.column()
 
-        // ---- the big one ---------------------------------------------------
+        // ---- the big one (for the owner: copy and paste) --------------------
         val copyWrap = activity.column().apply {
             setPadding(activity.dpi(12), activity.dpi(8), activity.dpi(12), 0)
         }
@@ -114,29 +110,28 @@ class DebugScreen(private val activity: AppCompatActivity) {
         }
         col.addView(panel, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
 
-        // ---- secondary actions ---------------------------------------------
-        val actions = activity.row().apply { setPadding(activity.dpi(6), activity.dpi(2), activity.dpi(6), activity.dpi(8)) }
-        actions.addView(activity.tonalButton("Self-test").apply { setOnClickListener { runSelfTest() } })
-        actions.addView(activity.tonalButton("Share").apply {
-            setOnClickListener { runCatching { Report.shareText(activity, buildReport()) } }
-        })
-        actions.addView(activity.tonalButton("ZIP").apply { setOnClickListener { saveZip() } })
-        actions.addView(activity.tonalButton("Issue").apply { setOnClickListener { newIssue() } })
-        actions.addView(activity.tonalButton("Clear").apply {
-            setOnClickListener {
-                LogStore.clearAll()
-                lastRendered = ""
-                renderLogs()
-                toast("Logs cleared")
-            }
-        })
-        actions.addView(activity.tonalButton("Host shell").apply { setOnClickListener { openHostShell() } })
-        for (i in 0 until actions.childCount) {
-            (actions.getChildAt(i).layoutParams as? LinearLayout.LayoutParams)?.let { lp ->
-                lp.setMargins(activity.dpi(3), 0, activity.dpi(3), 0)
-            }
+        // ---- one button for everyone else ----------------------------------
+        val sendWrap = activity.column().apply {
+            setPadding(activity.dpi(12), activity.dpi(4), activity.dpi(12), activity.dpi(10))
         }
-        col.addView(activity.hScroll(actions))
+        sendButton = activity.primaryButton("Having issues? Send the report to our team on GitHub").apply {
+            textSize = 14f
+            setOnClickListener { sendToGithub() }
+        }
+        sendWrap.addView(
+            sendButton,
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, activity.dpi(60))
+        )
+        sendWrap.addView(
+            TextView(activity).apply {
+                text = "Runs the self-test, copies the full report and opens a new GitHub issue with it. " +
+                    "Nothing leaves your phone until you press Send there."
+                textSize = 11f
+                setTextColor(activity.color(R.color.on_surface_3))
+                setPadding(activity.dpi(4), activity.dpi(6), activity.dpi(4), 0)
+            }
+        )
+        col.addView(sendWrap)
 
         root = col
         renderLogs()
@@ -216,106 +211,38 @@ class DebugScreen(private val activity: AppCompatActivity) {
     private fun copyEverything() {
         val text = buildReport()
         if (Report.copy(activity, text)) {
-            toast("Copied ${text.length} chars — paste it into the issue")
+            toast("Copied ${text.length} chars — paste it where it belongs")
         } else {
-            toast("Clipboard unavailable — use ZIP instead")
+            toast("Clipboard unavailable")
         }
     }
 
-    private fun saveZip() {
+    /**
+     * The one action for a normal user: run the self-test so the report is
+     * complete, copy it (so a paste is always possible) and open a new issue
+     * with the important part already filled in.
+     */
+    private fun sendToGithub() {
+        sendButton.isEnabled = false
+        sendButton.text = "Preparing the report…"
         activity.lifecycleScope.launch {
-            val file = withContext(Dispatchers.IO) {
-                runCatching { Report.saveZip(activity, lastSelfTest) }.getOrNull()
+            val selfTest = withContext(Dispatchers.IO) {
+                runCatching { SelfTest.run(activity) }
+                    .getOrElse { "self-test failed: ${it.javaClass.simpleName}: ${it.message}" }
             }
-            if (file == null) {
-                toast("Could not write the ZIP")
-            } else {
-                toast("ZIP ready: ${file.name}")
-                Report.shareFile(activity, file)
-            }
+            lastSelfTest = selfTest
+            val text = buildReport()
+            val copied = Report.copy(activity, text)
+            val url = runCatching { Report.issueUrl(text) }
+                .getOrElse { "https://github.com/${Report.REPO}/issues/new" }
+            Report.openUrl(activity, url)
+            sendButton.isEnabled = true
+            sendButton.text = "Having issues? Send the report to our team on GitHub"
+            toast(
+                if (copied) "Issue opened — the full report is on your clipboard, paste it in if asked"
+                else "Issue opened — use Copy everything above to attach the details"
+            )
         }
-    }
-
-    private fun newIssue() {
-        val text = buildReport()
-        val copied = Report.copy(activity, text)
-        val url = runCatching { Report.issueUrl(text) }.getOrElse { "https://github.com/${Report.REPO}/issues/new" }
-        Report.openUrl(activity, url)
-        toast(if (copied) "Report copied — paste it into the issue" else "Opened issue page")
-    }
-
-    private fun runSelfTest() {
-        toast("Running self-test…")
-        activity.lifecycleScope.launch {
-            val result = withContext(Dispatchers.IO) {
-                runCatching { SelfTest.run(activity) }.getOrElse { "self-test failed: ${it.javaClass.simpleName}: ${it.message}" }
-            }
-            lastSelfTest = result
-            showSelfTestDialog(result)
-            renderLogs()
-        }
-    }
-
-    private fun showSelfTestDialog(text: String) {
-        val view = activity.column()
-        view.addView(
-            activity.monoText(text, 10f).apply {
-                setPadding(activity.dpi(14), activity.dpi(10), activity.dpi(14), activity.dpi(6))
-            }
-        )
-        val dialog = MaterialAlertDialogBuilder(activity)
-            .setTitle("Self-test")
-            .setView(ScrollView(activity).apply { addView(view) })
-            .setPositiveButton("Copy") { _, _ ->
-                if (Report.copy(activity, text)) toast("Self-test copied")
-            }
-            .setNegativeButton("Close", null)
-            .create()
-        dialog.show()
-    }
-
-    private fun openHostShell() {
-        val home = File(activity.filesDir, "home").apply { mkdirs() }
-        val col = activity.column().apply { setPadding(activity.dpi(8), activity.dpi(8), activity.dpi(8), 0) }
-        val output = activity.monoText("", 10.5f)
-        val shell = ShellSession(home) { line ->
-            activity.runOnUiThread {
-                output.append(if (output.text.isEmpty()) line else "\n$line")
-                LogStore.log(Channel.SHELL, line)
-            }
-        }
-        val scroll = ScrollView(activity).apply { addView(output) }
-        col.addView(scroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, activity.dpi(280)))
-
-        val input = EditText(activity).apply {
-            hint = "host command"
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
-            setSingleLine()
-            textSize = 12f
-        }
-        col.addView(input)
-        col.addView(
-            activity.bodyText("Host shell runs /system/bin/sh as the app uid (no root, no pty).", 11f)
-        )
-
-        input.setOnEditorActionListener { _, _, _ ->
-            val cmd = input.text.toString().trim()
-            if (cmd.isNotEmpty()) {
-                output.append("\n$ $cmd")
-                shell.exec(cmd)
-                input.setText("")
-            }
-            true
-        }
-
-        shell.start()
-        val dialog = MaterialAlertDialogBuilder(activity)
-            .setTitle("Host shell (diagnostic)")
-            .setView(col)
-            .setNegativeButton("Close", null)
-            .create()
-        dialog.setOnDismissListener { shell.stop() }
-        dialog.show()
     }
 
     private fun toast(message: String) {

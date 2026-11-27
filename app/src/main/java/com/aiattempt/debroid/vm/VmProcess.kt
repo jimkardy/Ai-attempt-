@@ -81,8 +81,10 @@ class VmProcess private constructor(
             return buildList {
                 add(kernel?.absolutePath ?: "<missing $KERNEL_16K>")
                 add("mem=${vm.ramMb}M")
-                // A umid keeps two kernels from sharing state; it must be short and unique.
-                add("umid=debroid-${vm.id.replace("-", "").take(8)}")
+                // No `umid`: UML names its state files after it and refused the
+                // short name ("umid_file_name : buffer too short"). Only one VM
+                // runs at a time and TMPDIR points at this VM's own directory,
+                // so the default identity is both quieter and safer.
                 add("ubd0=${disk.absolutePath}")
                 add("root=/dev/ubda")
                 add("rw")

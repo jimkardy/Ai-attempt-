@@ -5,119 +5,67 @@ import android.os.StatFs
 import com.aiattempt.debroid.log.Channel
 import com.aiattempt.debroid.log.LogStore
 import com.aiattempt.debroid.vm.VmImage
+import com.aiattempt.debroid.vm.VmInstance
+import com.aiattempt.debroid.vm.VmManager
+import com.aiattempt.debroid.vm.VmStore
 import java.io.File
 import java.util.Locale
-import java.util.concurrent.TimeUnit
 
 /**
- * "Reclaim Android storage": asks the kernel to discard the blocks of deleted
- * files (`fstrim`), then purges the caches Debroid itself owns.
+ * "Reclaim storage" — done where it actually matters: inside the VM's disk.
  *
- * fstrim needs CAP_SYS_ADMIN, which a normal app does not have, so on a
- * non-rooted phone the call itself is refused by the kernel. That is reported
- * honestly instead of being hidden: the report shows the exact command, its
- * exit code and its output, plus how much free space actually changed. When a
- * root shell is available (`su`) the same command is run through it and really
- * does trim the filesystem.
+ * This used to run `fstrim -v /data` on Android, which was the wrong filesystem:
+ * deleting a 1 GB file inside the guest leaves those blocks marked used in the
+ * VM's `disk.img`, and trimming Android's /data cannot free them. The trim now
+ * runs inside the guest (`fstrim -v /` over its console); UML's `ubd` driver
+ * enables discard by default and turns each discard into a hole punch on
+ * `disk.img`, so the space really does come back to Android. The numbers shown
+ * are Android's own allocation of that file (`st_blocks`), before and after.
+ *
+ * The caches Debroid owns are still cleared here, since they live on Android.
  */
 object StorageReclaim {
 
-    private const val TIMEOUT_SECONDS = 25L
+    fun run(ctx: Context, vm: VmInstance): String {
+        val disk = VmStore.diskImage(ctx, vm.id)
+        val before = VmImage.allocatedBytes(disk)
+        val freeBefore = freeBytes(ctx)
+        val fsBytes = VmImage.fsBytes(disk)
+        val text = buildString {
+            appendLine("Reclaim storage — ${LogStore.stamp()}")
+            appendLine("VM            : ${vm.name} (${vm.state})")
+            appendLine("disk reserved : ${VmInstance.formatDisk(vm.diskMb)} (sparse file)")
+            appendLine("filesystem    : ${fsBytes?.let { mb(it) + " MB" } ?: "unknown"} inside the disk")
+            appendLine("used on Android: ${mb(before)} MB")
+            appendLine()
 
-    /** Files bigger than this are never trimmed by path, only by the whole fs. */
-    private data class Exec(val code: Int, val output: String)
+            appendLine("[1] trim inside the guest — fstrim -v /")
+            val trim = VmManager.trimGuestDisk(ctx, vm.id)
+            appendLine(trim.output.ifBlank { "(no output)" })
+            appendLine()
 
-    fun run(ctx: Context): String = buildString {
-        appendLine("Reclaim Android storage — ${LogStore.stamp()}")
-        val before = freeBytes(ctx)
-        appendLine("free space before : ${mb(before)} MB")
-        appendLine()
-
-        appendLine("[1] fstrim -v /  (the kernel's discard of deleted blocks)")
-        val trim = fstrim()
-        appendLine(trim.output.trim().ifBlank { "(no output)" })
-        appendLine("result: ${trim.summary}")
-        appendLine()
-
-        appendLine("[2] Debroid caches")
-        append(purge(ctx))
-        val after = freeBytes(ctx)
-        appendLine()
-        appendLine("free space after  : ${mb(after)} MB")
-        appendLine("difference        : ${mb(after - before)} MB")
-        appendLine()
-        append(
-            if (trim.trimmed) {
-                "The filesystem was trimmed: the blocks of already-deleted files are now free for reuse."
-            } else {
-                "fstrim was refused (exit ${trim.code}). Android only lets a root process discard blocks, " +
-                    "and this build runs as a normal app. Nothing was damaged; the space a trimmed " +
-                    "filesystem would return stays reserved until Android's own periodic trim runs " +
-                    "(Android does this by itself, usually while charging and idle)."
-            }
-        )
-    }.also { text ->
-        LogStore.log(Channel.APP, "reclaim storage:\n$text")
-    }
-
-    // ---- fstrim -----------------------------------------------------------
-
-    private class Trim(val trimmed: Boolean, val code: Int, val output: String) {
-        val summary: String
-            get() = if (trimmed) "trimmed" else "not permitted (no root)"
-    }
-
-    private fun fstrim(): Trim {
-        // 1. root shell, if the phone has one. This is the only path that really trims.
-        execWithTimeout(listOf("su", "-c", "/system/bin/fstrim -v /data; /system/bin/fstrim -v /"))?.let { r ->
-            if (r.code == 0 && r.output.contains("trimmed", ignoreCase = true)) {
-                return Trim(true, 0, r.output)
-            }
-        }
-        // 2. the trim binary directly, as the app. The kernel will refuse without CAP_SYS_ADMIN;
-        //    the point of running it is to report exactly what Android said.
-        val direct = listOf(
-            listOf("/system/bin/fstrim", "-v", "/data"),
-            listOf("/system/xbin/fstrim", "-v", "/data"),
-            listOf("fstrim", "-v", "/data")
-        )
-        var last: Trim? = null
-        for (cmd in direct) {
-            val r = execWithTimeout(cmd) ?: continue
-            val trimmed = r.code == 0 && r.output.contains("trimmed", ignoreCase = true)
-            val t = Trim(trimmed, r.code, "$ ${cmd.joinToString(" ")}\nexit ${r.code}\n${r.output.trim()}")
-            if (trimmed) return t
-            last = t
-        }
-        return last ?: Trim(false, -1, "$ fstrim -v /data\nexit -1\nno fstrim binary found on this device")
-    }
-
-    private fun execWithTimeout(command: List<String>): Exec? {
-        val process = try {
-            ProcessBuilder(command).redirectErrorStream(true).start()
-        } catch (_: Throwable) {
-            return null
-        }
-        val out = StringBuilder()
-        val reader = Thread({
-            try {
-                process.inputStream.bufferedReader().use { r ->
-                    r.lineSequence().forEach { line ->
-                        if (out.length < 4000) out.appendLine(line)
-                    }
+            appendLine("[2] Debroid caches (these live on Android)")
+            append(purge(ctx))
+            val freeAfter = freeBytes(ctx)
+            appendLine()
+            appendLine("android free space: ${mb(freeBefore)} MB -> ${mb(freeAfter)} MB")
+            appendLine(
+                "this VM's disk  : ${mb(trim.hostBefore)} MB -> ${mb(trim.hostAfter)} MB " +
+                    "(${mb(trim.hostFreed)} MB released)"
+            )
+            appendLine()
+            append(
+                if (trim.ran) {
+                    "Trim is done. Space freed inside the guest no longer costs Android anything: the " +
+                        "blocks were punched out of the disk image itself."
+                } else {
+                    "Start the VM and run this again: the trim has to happen inside the guest's own " +
+                        "filesystem, so it cannot run while the VM is stopped."
                 }
-            } catch (_: Throwable) {
-            }
-        }, "reclaim-read").apply { isDaemon = true; start() }
-        val finished = runCatching {
-            process.waitFor(TIMEOUT_SECONDS, TimeUnit.SECONDS)
-        }.getOrDefault(false)
-        if (!finished) {
-            runCatching { process.destroyForcibly() }
+            )
         }
-        runCatching { reader.join(1000) }
-        val code = runCatching { process.exitValue() }.getOrDefault(-1)
-        return Exec(if (finished) code else -1, out.toString())
+        LogStore.log(Channel.APP, "reclaim storage:\n$text")
+        return text
     }
 
     // ---- Debroid's own caches --------------------------------------------

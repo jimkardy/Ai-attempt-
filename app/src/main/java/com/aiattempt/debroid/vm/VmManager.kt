@@ -5,6 +5,7 @@ import android.content.Context
 import com.aiattempt.debroid.log.Channel
 import com.aiattempt.debroid.log.LogStore
 import com.aiattempt.debroid.sys.SysInfo
+import java.io.RandomAccessFile
 import java.util.UUID
 
 /**
@@ -262,6 +263,29 @@ object VmManager {
             val safeDisk = alignDown(diskMb.coerceIn(diskMin, diskCeil), DISK_STEP_MB).coerceAtLeast(diskMin)
             val clean = cleanPorts(ports)
 
+            // Growing the disk is real: the sparse image is extended right here so
+            // the guest's next boot finds a bigger /dev/ubda and resize2fs fills it.
+            // A running VM is left alone — its block device cannot change size.
+            if (safeDisk > onDiskMb && runningId != id && preparingId != id) {
+                val diskFile = VmStore.diskImage(ctx, id)
+                val grown = runCatching {
+                    RandomAccessFile(diskFile, "rw").use { it.setLength(safeDisk.toLong() * 1024L * 1024L) }
+                }.isSuccess
+                appendConsole(
+                    ctx, vm,
+                    if (grown)
+                        "disk extended: ${VmInstance.formatDisk(onDiskMb)} -> ${VmInstance.formatDisk(safeDisk)} " +
+                            "(sparse — only what the guest writes costs storage; the filesystem grows on boot)"
+                    else "could not extend the disk image to ${VmInstance.formatDisk(safeDisk)}"
+                )
+                if (grown) LogStore.log(Channel.ENGINE, "disk ${vm.name}: $onDiskMb MB -> $safeDisk MB")
+            } else if (safeDisk > onDiskMb) {
+                appendConsole(
+                    ctx, vm,
+                    "disk will grow to ${VmInstance.formatDisk(safeDisk)} once this VM is stopped"
+                )
+            }
+
             val resourcesChanged = safeCores != vm.cores || safeRam != vm.ramMb || safeDisk != vm.diskMb
             vm.name = uniqueName(name, id)
             vm.cores = safeCores
@@ -420,6 +444,12 @@ object VmManager {
                     VmStore.save(ctx, items)
                 }
                 appendConsole(ctx, vm, "guest process ended, exit code $code")
+                GuestExit.explain(code)?.let { appendConsole(ctx, vm, it) }
+                val traps = GuestExit.trapLines()
+                if (traps.isNotEmpty()) {
+                    appendConsole(ctx, vm, "seccomp / signal lines seen in logcat:")
+                    traps.forEach { line -> appendConsole(ctx, vm, "  $line") }
+                }
                 notifyChanged()
             }
         )
@@ -486,6 +516,103 @@ object VmManager {
     }
 
     fun isRunning(ctx: Context, id: String): Boolean = runningId == id && process?.isAlive == true
+
+    // ---- guest disk trim ----------------------------------------------------
+
+    data class DiskTrim(
+        val ran: Boolean,
+        val output: String,
+        val hostBefore: Long,
+        val hostAfter: Long
+    ) {
+        val hostFreed: Long get() = (hostBefore - hostAfter).coerceAtLeast(0L)
+    }
+
+    /**
+     * Runs `fstrim /` **inside the guest**, over its console.
+     *
+     * Trimming Android's own filesystem would never help: deleting 1 GB inside
+     * the VM leaves 1 GB of blocks marked used in `disk.img`. UML's `ubd` driver
+     * enables discard by default and turns each guest discard into a hole punch on
+     * that file, so this is the call that actually gives the space back to
+     * Android. It has to run in the guest, so the VM must be running.
+     */
+    fun trimGuestDisk(ctx: Context, id: String, timeoutMs: Long = 45_000): DiskTrim {
+        ensure(ctx)
+        val vm = find(ctx, id) ?: return DiskTrim(false, "That VM no longer exists.", 0, 0)
+        val diskFile = VmStore.diskImage(ctx, id)
+        val before = VmImage.allocatedBytes(diskFile)
+        if (!isRunning(ctx, id)) {
+            return DiskTrim(
+                false,
+                "This VM is not running. The trim happens inside the guest, so start it first, " +
+                    "then run this again. Nothing was changed.",
+                before, before
+            )
+        }
+
+        val marker = "__DEBROID_TRIM_DONE_${System.currentTimeMillis()}__"
+        val consoleFile = VmStore.consoleFile(ctx, id)
+        val startOffset = runCatching { consoleFile.length() }.getOrDefault(0L)
+        val command = "fstrim -v / 2>&1; df -h / 2>&1; sync; echo $marker"
+        if (!sendInput(ctx, id, command)) {
+            return DiskTrim(false, "The console of '${vm.name}' refused input; is it still running?", before, before)
+        }
+
+        var seen = ""
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            seen = readFrom(consoleFile, startOffset)
+            if (seen.contains(marker)) break
+            runCatching { Thread.sleep(250) }
+        }
+
+        val cleaned = seen.lineSequence()
+            .filter { line -> !line.contains(marker) && !line.trimStart().startsWith("> fstrim") }
+            .joinToString("\n")
+            .trim()
+
+        val after = VmImage.allocatedBytes(diskFile)
+        val finished = seen.contains(marker)
+        val summary = buildString {
+            appendLine("trim inside '${vm.name}' — ${LogStore.stamp()}")
+            appendLine(if (finished) cleaned.ifBlank { "(no output)" }
+            else "the guest did not answer within ${timeoutMs / 1000} s; output so far:\n" +
+                cleaned.ifBlank { "(none)" })
+            appendLine()
+            appendLine("android storage used by this disk: ${mbText(before)} -> ${mbText(after)}")
+            appendLine(
+                if (after < before) "released ${mbText(before - after)} back to Android"
+                else "no blocks were released: the filesystem had nothing discarded, or trim was refused"
+            )
+        }
+        LogStore.log(Channel.ENGINE, "guest trim ${vm.name}: ${mbText(before)} -> ${mbText(after)}")
+        appendConsole(ctx, vm, "guest disk trim: ${mbText(before)} -> ${mbText(after)} used on Android")
+        return DiskTrim(true, summary.trimEnd(), before, after)
+    }
+
+    private fun readFrom(file: java.io.File, offset: Long): String {
+        return try {
+            if (!file.exists()) {
+                ""
+            } else {
+                RandomAccessFile(file, "r").use { raf ->
+                    if (raf.length() <= offset) {
+                        ""
+                    } else {
+                        raf.seek(offset)
+                        val buf = ByteArray((raf.length() - offset).coerceAtMost(64L * 1024L).toInt())
+                        val n = raf.read(buf)
+                        if (n <= 0) "" else String(buf, 0, n)
+                    }
+                }
+            }
+        } catch (_: Throwable) {
+            ""
+        }
+    }
+
+    private fun mbText(bytes: Long): String = String.format(java.util.Locale.US, "%.0f MB", bytes / (1024.0 * 1024.0))
 
     fun isPreparing(id: String): Boolean = preparingId == id
 

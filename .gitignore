@@ -9,3 +9,6 @@ captures/
 .cxx/
 *.apk.idsig
 app/src/main/jniLibs/
+
+# locally built CI artefacts
+dist/

@@ -14,6 +14,7 @@ import androidx.lifecycle.lifecycleScope
 import com.aiattempt.debroid.R
 import com.aiattempt.debroid.sys.StorageReclaim
 import com.aiattempt.debroid.vm.PortForward
+import com.aiattempt.debroid.vm.VmImage
 import com.aiattempt.debroid.vm.VmInstance
 import com.aiattempt.debroid.vm.VmManager
 import com.aiattempt.debroid.vm.VmStore
@@ -30,9 +31,10 @@ import kotlinx.coroutines.withContext
  * only grow, because shrinking a filesystem that already holds a guest's files
  * would destroy them.
  *
- * It also carries the **Reclaim Android storage** action (`fstrim -v /`), which
- * is Android's own way of releasing the blocks of deleted files back to the
- * device. See [StorageReclaim] for what a non-rooted app can and cannot do.
+ * It also carries the **storage** block: how big the disk, the filesystem inside
+ * it and Android's real usage are, plus **Trim this VM's disk**, which runs
+ * `fstrim` inside the guest so space freed there comes back to Android. See
+ * [StorageReclaim].
  */
 class EditVmSheet(
     private val activity: AppCompatActivity,
@@ -165,7 +167,8 @@ class EditVmSheet(
             captionText(
                 if (diskMin > VmManager.MIN_DISK_MB)
                     "the disk can only grow: it already holds this VM's filesystem " +
-                        "(${VmInstance.formatDisk(diskMin)})"
+                        "(${VmInstance.formatDisk(diskMin)}). Raising it extends the image now and " +
+                        "the guest grows the filesystem at its next boot"
                 else "${VmInstance.formatDisk(diskMax)} is the maximum here · ${budget.diskFreeMb / 1024} GB free"
             )
         )
@@ -222,11 +225,11 @@ class EditVmSheet(
             matchWrap(top = activity.dpi(8))
         )
 
-        // ---- storage reclaim ----------------------------------------------
+        // ---- storage -------------------------------------------------------
         col.addView(activity.divider())
         col.addView(
             TextView(activity).apply {
-                text = "ANDROID STORAGE"
+                text = "STORAGE"
                 textSize = 11f
                 letterSpacing = 0.08f
                 setTypeface(Typeface.DEFAULT_BOLD)
@@ -234,33 +237,55 @@ class EditVmSheet(
                 setPadding(0, 0, 0, activity.dpi(6))
             }
         )
+        val diskImage = VmStore.diskImage(activity, vm.id)
+        val allocated = VmImage.allocatedBytes(diskImage)
+        val fsBytes = VmImage.fsBytes(diskImage)
+        val fsMb = fsBytes?.let { (it / (1024 * 1024)).toInt() }
+        val facts = activity.monoText(
+            buildString {
+                appendLine("reserved     : ${VmInstance.formatDisk(disk)} (sparse)")
+                appendLine("filesystem   : ${fsMb?.let { formatMb(it) } ?: "not created yet"} inside the disk")
+                appendLine("on Android   : ${formatMb((allocated / (1024 * 1024)).toInt())} actually used")
+                if (fsMb != null && disk > fsMb) {
+                    append("grows to     : ${VmInstance.formatDisk(disk)} on the next boot")
+                } else {
+                    append("trim         : returns deleted blocks to Android")
+                }
+            },
+            10.5f
+        ).apply {
+            setBackgroundColor(activity.color(R.color.bg))
+            setPadding(activity.dpi(12), activity.dpi(10), activity.dpi(12), activity.dpi(10))
+        }
+        col.addView(facts, matchWrap(top = activity.dpi(2)))
+
         val reclaimOutput = activity.monoText("Not run yet.", 10.5f).apply {
             setBackgroundColor(activity.color(R.color.bg))
             setPadding(activity.dpi(12), activity.dpi(10), activity.dpi(12), activity.dpi(10))
         }
-        val reclaimButton = activity.tonalButton("Reclaim Android storage").apply {
+        val reclaimButton = activity.tonalButton("Trim this VM's disk").apply {
             setOnClickListener {
                 isEnabled = false
-                setText("Reclaiming…")
-                reclaimOutput.text = "Running fstrim -v / and clearing caches…"
+                setText("Trimming…")
+                reclaimOutput.text = "Running fstrim inside the guest…"
                 activity.lifecycleScope.launch {
                     val text = withContext(Dispatchers.IO) {
-                        runCatching { StorageReclaim.run(activity) }
+                        runCatching { StorageReclaim.run(activity, vm) }
                             .getOrElse { "reclaim failed: ${it.javaClass.simpleName}: ${it.message}" }
                     }
                     reclaimOutput.text = text
                     isEnabled = true
-                    setText("Reclaim Android storage")
+                    setText("Trim this VM's disk")
                     onSaved()
                 }
             }
         }
-        col.addView(reclaimButton, matchWrap(top = activity.dpi(2)))
+        col.addView(reclaimButton, matchWrap(top = activity.dpi(8)))
         col.addView(
             captionText(
-                "Runs fstrim -v / (the kernel's discard of deleted blocks) and clears Debroid's own " +
-                    "caches. Android only allows fstrim for root, so on a normal phone it reports " +
-                    "exactly what was refused instead of pretending."
+                "Runs fstrim inside the guest and clears Debroid's caches. Deleting files inside the " +
+                    "VM does not shrink its disk image until the guest discards those blocks — this is " +
+                    "what gives that space back to Android. The VM must be running."
             )
         )
         col.addView(

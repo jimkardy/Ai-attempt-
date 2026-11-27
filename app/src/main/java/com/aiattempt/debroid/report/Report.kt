@@ -9,6 +9,7 @@ import androidx.core.content.FileProvider
 import com.aiattempt.debroid.log.LogStore
 import com.aiattempt.debroid.sys.DeviceSupport
 import com.aiattempt.debroid.sys.SysInfo
+import com.aiattempt.debroid.vm.GuestExit
 import com.aiattempt.debroid.vm.VmImage
 import com.aiattempt.debroid.vm.VmManager
 import com.aiattempt.debroid.vm.VmProcess
@@ -44,6 +45,12 @@ object Report {
             appendLine(VmProcess.describe(ctx, vm).trimEnd())
             appendLine(VmImage.describe(ctx))
             appendLine("log budget   : ${LogStore.totalBytes() / 1024} KB of ${LogStore.TOTAL_BUDGET_BYTES / (1024 * 1024)} MB")
+            if (vm != null) GuestExit.explain(vm.lastExit ?: 0)?.let { appendLine("exit meaning : $it") }
+        }
+        appendLine("--- seccomp ---")
+        runCatching {
+            val vm = VmManager.running(ctx) ?: VmManager.list(ctx).firstOrNull()
+            appendLine(GuestExit.report(vm?.lastExit).trimEnd())
         }
         appendLine()
         val consoles = runCatching { VmManager.consoleDump(ctx) }.getOrDefault("")
@@ -118,7 +125,8 @@ object Report {
 
     /** Pre-filled GitHub issue. Bodies are truncated so the URL stays usable. */
     fun issueUrl(text: String): String {
-        val limit = 5000
+        // GitHub's editor is a browser URL: keep it short enough to open everywhere.
+        val limit = 1800
         val body = if (text.length > limit) text.take(limit) + "\n\n...[truncated - paste the ZIP contents or the full copied report]" else text
         val title = URLEncoder.encode("Bug report (debug build)", "UTF-8")
         val encoded = URLEncoder.encode(body, "UTF-8")

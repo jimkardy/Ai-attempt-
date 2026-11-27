@@ -1,6 +1,7 @@
 package com.aiattempt.debroid.vm
 
 import android.content.Context
+import android.system.Os
 import com.aiattempt.debroid.BuildConfig
 import com.aiattempt.debroid.log.Channel
 import com.aiattempt.debroid.log.LogStore
@@ -257,4 +258,48 @@ object VmImage {
 
     fun percent(bytes: Long, total: Long): String =
         String.format(Locale.US, "%d%%", if (total <= 0) 0 else (bytes * 100 / total).toInt())
+
+    /**
+     * Bytes this image really occupies on Android's filesystem. The file is
+     * sparse, so its length is the *reservation* while this is the bill: it only
+     * shrinks when the guest's own `fstrim` discards blocks (UML's ubd driver
+     * turns a discard into a hole punch on this very file).
+     */
+    fun allocatedBytes(f: File): Long = try {
+        Os.lstat(f.absolutePath).st_blocks * 512L
+    } catch (_: Throwable) {
+        runCatching { f.length() }.getOrDefault(0L)
+    }
+
+    /**
+     * Size of the ext4 filesystem *inside* the image, read from the superblock
+     * (s_blocks_count_* and s_log_block_size). Null when there is no filesystem.
+     * This is what `df /` shows in the guest; it is normally smaller than the
+     * disk file, because the guest only grows it at boot.
+     */
+    fun fsBytes(f: File): Long? = try {
+        RandomAccessFile(f, "r").use { raf ->
+            if (raf.length() < 2048) return null
+            val sb = ByteArray(1024)
+            raf.seek(1024)
+            if (raf.read(sb) != sb.size) return null
+            // 0xEF53 little endian at offset 56 of the superblock.
+            if (sb[56] != 0x53.toByte() || sb[57] != 0xEF.toByte()) return null
+            val blocksLo = le32(sb, 4)
+            val logBlockSize = le32(sb, 24)
+            if (logBlockSize > 6) return null
+            val blockSize = 1024L shl logBlockSize.toInt()
+            blocksLo * blockSize
+        }
+    } catch (_: Throwable) {
+        null
+    }
+
+    private fun le32(buf: ByteArray, offset: Int): Long {
+        var v = 0L
+        for (i in 3 downTo 0) {
+            v = (v shl 8) or (buf[offset + i].toLong() and 0xFFL)
+        }
+        return v
+    }
 }

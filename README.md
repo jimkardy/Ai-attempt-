@@ -102,26 +102,29 @@ one console).
 
 **Gear / edit sheet** — change the name, cores, RAM, disk and port forwards. Changes are saved
 immediately and used on the next boot; the disk can only grow, because it already holds that
-guest's filesystem. At the bottom, **Reclaim Android storage** and a box showing its exact output.
+guest's filesystem. Raising the disk extends the sparse image at once and the guest grows its
+filesystem to fill it on the next boot. The storage block shows the reserved size, the filesystem
+inside the disk and what the disk really costs on Android, plus **Trim this VM's disk**.
 
 **Terminal tab** — nothing running: a Start button. Running: the guest console, with an input line,
 Restart, Stop and Copy log. The first Start of a new VM also downloads the Debian image, with
 progress in the console.
 
-**Debug tab** — one panel with every log, a **COPY EVERYTHING** button at the top (device, support,
-UML artefacts, VM consoles, every channel), plus Share, ZIP, Issue, Clear and a diagnostic host
-shell. Paste that report into an issue and the bug is usually obvious.
+**Debug tab** — one panel with every log and a **COPY EVERYTHING** button at the top (device,
+support, UML artefacts, VM consoles, every channel, a `--- seccomp ---` section). At the bottom there
+is one button for everyone else: **Having issues? Send the report to our team on GitHub** — it runs
+the self-test, copies the full report and opens a new issue with it.
 
-### About "Reclaim Android storage"
+### About "Trim this VM's disk"
 
-`fstrim -v /` asks the kernel to discard the blocks of files that were already deleted, so the
-device can reuse them. Android only allows that with root (`CAP_SYS_ADMIN`), and Debroid runs as a
-normal app, so on a stock phone the call is **refused** — Android also does its own periodic trim
-(usually while charging and idle), which is why free space normally recovers by itself.
+`fstrim` asks a filesystem to discard the blocks of files that were already deleted, so the device
+can reuse them. On Android this is the wrong filesystem to trim: a 1 GB file you delete *inside* the
+guest stays marked used in the VM's `disk.img` until the guest discards it.
 
-The button therefore does two things and says which one worked: it tries `fstrim` through `su` if a
-root shell exists, otherwise runs it directly and shows the refusal verbatim, and it always clears
-Debroid's own caches and interrupted downloads. It never pretends to have freed space it did not.
+So the trim runs **inside the guest**, over its console. UML's `ubd` driver has discard enabled by
+default and turns each guest discard into a hole punch on `disk.img`, which is what makes Android see
+the space again. The box reports Android's real usage of that disk before and after (`st_blocks`), and
+also clears Debroid's own caches and interrupted downloads.
 
 ## Build
 
@@ -138,9 +141,11 @@ CI (`.github/workflows/debug-build.yml`) does the rest on every push to `debuggi
 2. downloads the pinned UML kernel and stub helper, verifying their SHA-256,
 3. builds the APK and checks it with `apksigner` / `zipalign` / `aapt2`, including that the kernel
    is really inside,
-4. builds the Debian trixie arm64 ext4 image on an arm64 runner with `debootstrap` (script:
-   `native/rootfs/debroid-init` is the guest init),
-5. publishes both, plus checksums and `NOTICE.md`, as the `debug-v<version>` pre-release.
+4. builds the guest init (`native/init/debroid-init.c`) as a static aarch64 binary with the same
+   pinned NDK, and verifies it has no interpreter,
+5. builds the Debian trixie arm64 ext4 image on an arm64 runner with `debootstrap`, installing that
+   exact init as `/sbin/debroid-init`,
+6. publishes both, plus the init, checksums and `NOTICE.md`, as the `debug-v<version>` pre-release.
 
 >A local build without the NDK produces an APK with no native library, so it is not ABI-gated and
 >has no kernel. Only the CI-published APK carries both.
@@ -152,8 +157,10 @@ CI (`.github/workflows/debug-build.yml`) does the rest on every push to `debuggi
 3. **0.2.1** — VM tab renders on launch, create form no longer crashes, create button greys out. ✅
 4. **0.3.0** — real boot: arm64 UML kernel + Debian trixie ext4 disk, per-VM edit sheet with storage
    reclaim, 100 MB log budget. ✅
-5. **0.4.0** — guest networking (`umnet`/`passt`), SSH, and the port forwards actually forwarding.
-6. **0.5.0** — rolling "always latest Debian" rootfs updates on the `updates` branch, and building
+5. **0.3.2** — static guest init (the SIGSYS seccomp trap that killed 0.3.1), growable disk, trim
+   inside the guest, exit-code diagnosis, one-button GitHub report. 🔄
+6. **0.4.0** — guest networking (`umnet`/`passt`), SSH, and the port forwards actually forwarding.
+7. **0.5.0** — rolling "always latest Debian" rootfs updates on the `updates` branch, and building
    the kernel from source in this repository's own CI.
 
 ## Licence
