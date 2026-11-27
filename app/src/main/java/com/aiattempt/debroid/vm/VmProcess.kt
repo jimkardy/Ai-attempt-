@@ -91,12 +91,13 @@ class VmProcess private constructor(
                 add("rootfstype=ext4")
                 add("init=/sbin/debroid-init")
                 add("stub_exe=${stub?.absolutePath ?: "<missing $STUB>"}")
-                // Without this the kernel defaults to `seccomp=off`, i.e. the
-                // ptrace userspace, where Android's app seccomp filter kills the
-                // guest with SIGSYS at its first syscall (exit 159). In SECCOMP
-                // mode the guest's syscalls are trapped and emulated in-process,
-                // which is exactly what a host that filters syscall numbers needs.
-                add("seccomp=on")
+                // `seccomp=on` cannot work inside an Android app: the port's
+                // SECCOMP mode installs its own BPF filter, and the `seccomp()`
+                // syscall is not in bionic's app allowlist, so Android traps it
+                // with SIGSYS. The 0.3.3 console died at "Checking that seccomp
+                // filters can be installed..." for exactly that reason. The
+                // ptrace userspace is the only mode that can run here.
+                add("seccomp=off")
                 add("con=null")
                 add("con0=fd:0,fd:1")
                 add("panic=-1")

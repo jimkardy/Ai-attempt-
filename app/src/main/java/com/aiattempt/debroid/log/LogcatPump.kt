@@ -1,5 +1,6 @@
 package com.aiattempt.debroid.log
 
+import com.aiattempt.debroid.vm.GuestExit
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -17,7 +18,9 @@ class LogcatPump(private val scope: CoroutineScope) {
             var announced = false
             while (isActive) {
                 try {
-                    val process = ProcessBuilder("logcat", "-v", "threadtime")
+                    // `-b all` includes the crash buffer, which is where the
+                    // tombstone naming a seccomp-refused syscall lands.
+                    val process = ProcessBuilder("logcat", "-b", "all", "-v", "threadtime")
                         .redirectErrorStream(true)
                         .start()
                     if (!announced) {
@@ -26,7 +29,10 @@ class LogcatPump(private val scope: CoroutineScope) {
                     }
                     process.inputStream.bufferedReader().useLines { seq ->
                         for (line in seq) {
-                            if (line.isNotBlank()) LogStore.log(Channel.LOGCAT, line)
+                            if (line.isNotBlank()) {
+                                LogStore.log(Channel.LOGCAT, line)
+                                GuestExit.record(line)
+                            }
                         }
                     }
                     process.waitFor()

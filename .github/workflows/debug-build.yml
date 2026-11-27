@@ -284,6 +284,24 @@ jobs:
 
             **arm64-v8a only, Android 10–15.** 32-bit, x86 and x86_64 phones are refused at install.
 
+            ## What is new in 0.3.4
+
+            - **`seccomp=on` is not possible in an Android app, so it is gone.** 0.3.3 got as far as
+              `Checking that seccomp filters can be installed...` and then died: the port's SECCOMP
+              mode installs its own BPF filter with the `seccomp()` syscall, and that syscall is not in
+              bionic's app allowlist, so Android traps it with SIGSYS (exit 159). No APK can change
+              that — it is the sandbox. The kernel is launched in the ptrace userspace again, which is
+              the only mode that can run here (one guest CPU, as before).
+            - **The report now names the syscall that killed the guest.** Android writes a tombstone
+              into logcat's `crash` buffer that says `Cause: seccomp prevented call to disallowed arm64
+              system call <n>`. That buffer was not being read and rotated away, which is why earlier
+              reports said "logcat traps: none captured". 0.3.4 streams `logcat -b all`, keeps every
+              matching line in a small ring that log rotation cannot drop, snapshots the crash buffer
+              the moment the kernel process exits, and prints the decoded name (for example
+              `set_robust_list (arm64 syscall 99)`) in the console and in `--- seccomp ---`.
+            - The Debug tab's **extra kernel parameters** field is unchanged: it is still the way to
+              try a variant without a new build.
+
             ## What is new in 0.3.3
 
             - **The missing switch: `seccomp=on`.** The kernel was starting in its ptrace userspace

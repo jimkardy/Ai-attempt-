@@ -444,7 +444,12 @@ object VmManager {
                     VmStore.save(ctx, items)
                 }
                 appendConsole(ctx, vm, "guest process ended, exit code $code")
+                // Read the tombstone now, while it is still in the crash buffer.
+                if (code != 0) GuestExit.captureTombstones()
                 GuestExit.explain(code)?.let { appendConsole(ctx, vm, it) }
+                GuestExit.blockedSyscall()?.let { (nr, name) ->
+                    appendConsole(ctx, vm, "Android refused $name (arm64 syscall $nr) and killed the kernel process")
+                }
                 val traps = GuestExit.trapLines()
                 if (traps.isNotEmpty()) {
                     appendConsole(ctx, vm, "seccomp / signal lines seen in logcat:")
