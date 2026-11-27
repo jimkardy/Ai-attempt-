@@ -157,10 +157,12 @@ CI (`.github/workflows/debug-build.yml`) does the rest on every push to `debuggi
 3. **0.2.1** — VM tab renders on launch, create form no longer crashes, create button greys out. ✅
 4. **0.3.0** — real boot: arm64 UML kernel + Debian trixie ext4 disk, per-VM edit sheet with storage
    reclaim, 100 MB log budget. ✅
-5. **0.3.2** — static guest init (the SIGSYS seccomp trap that killed 0.3.1), growable disk, trim
-   inside the guest, exit-code diagnosis, one-button GitHub report. 🔄
-6. **0.4.0** — guest networking (`umnet`/`passt`), SSH, and the port forwards actually forwarding.
-7. **0.5.0** — rolling "always latest Debian" rootfs updates on the `updates` branch, and building
+5. **0.3.2** — static guest init, growable disk, trim inside the guest, exit-code diagnosis,
+   one-button GitHub report. ✅
+6. **0.3.3** — the kernel now boots in the port's `SECCOMP` userspace mode instead of `ptrace`,
+   which is what Android's app seccomp filter needs; plus a debug field for extra kernel parameters. 🔄
+7. **0.4.0** — guest networking (`umnet`/`passt`), SSH, and the port forwards actually forwarding.
+8. **0.5.0** — rolling "always latest Debian" rootfs updates on the `updates` branch, and building
    the kernel from source in this repository's own CI.
 
 ## Licence

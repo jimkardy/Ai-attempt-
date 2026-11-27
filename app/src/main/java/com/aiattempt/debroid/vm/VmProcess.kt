@@ -91,9 +91,18 @@ class VmProcess private constructor(
                 add("rootfstype=ext4")
                 add("init=/sbin/debroid-init")
                 add("stub_exe=${stub?.absolutePath ?: "<missing $STUB>"}")
+                // Without this the kernel defaults to `seccomp=off`, i.e. the
+                // ptrace userspace, where Android's app seccomp filter kills the
+                // guest with SIGSYS at its first syscall (exit 159). In SECCOMP
+                // mode the guest's syscalls are trapped and emulated in-process,
+                // which is exactly what a host that filters syscall numbers needs.
+                add("seccomp=on")
                 add("con=null")
                 add("con0=fd:0,fd:1")
                 add("panic=-1")
+                // Debug-tab escape hatch: extra UML parameters, appended last so
+                // they win over the defaults above.
+                addAll(KernelArgs.extra(ctx))
             }
         }
 
@@ -197,6 +206,7 @@ class VmProcess private constructor(
                     appendLine("disk image   : ${disk.absolutePath} — " +
                         if (disk.exists()) "${disk.length() / (1024 * 1024)} MB" else "missing")
                     appendLine("argv         : ${arguments(ctx, vm).joinToString(" ")}")
+                appendLine("extra args   : ${KernelArgs.extra(ctx).joinToString(" ").ifBlank { "(none)" }}")
                 }
             }
         }

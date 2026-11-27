@@ -2,8 +2,12 @@ package com.aiattempt.debroid.ui
 
 import android.os.Handler
 import android.os.Looper
+import android.text.Editable
+import android.text.InputType
+import android.text.TextWatcher
 import android.view.View
 import android.view.ViewGroup
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -15,6 +19,7 @@ import com.aiattempt.debroid.log.Channel
 import com.aiattempt.debroid.log.LogStore
 import com.aiattempt.debroid.report.Report
 import com.aiattempt.debroid.sys.SelfTest
+import com.aiattempt.debroid.vm.KernelArgs
 import com.google.android.material.button.MaterialButton
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -109,6 +114,38 @@ class DebugScreen(private val activity: AppCompatActivity) {
             addView(logScroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, activity.dpi(360)))
         }
         col.addView(panel, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+
+        // ---- debug escape hatch --------------------------------------------
+        val argsWrap = activity.column().apply {
+            setPadding(activity.dpi(12), activity.dpi(2), activity.dpi(12), 0)
+        }
+        val argsField = EditText(activity).apply {
+            hint = "extra kernel parameters (debug; e.g. seccomp=auto)"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            setSingleLine()
+            textSize = 12f
+            setTextColor(activity.color(R.color.on_surface))
+            setHintTextColor(activity.color(R.color.on_surface_3))
+            setText(KernelArgs.extra(activity).joinToString(" "))
+            addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
+                override fun afterTextChanged(s: Editable?) = KernelArgs.store(activity, s?.toString().orEmpty())
+            })
+        }
+        argsWrap.addView(
+            argsField,
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, activity.dpi(44))
+        )
+        argsWrap.addView(
+            TextView(activity).apply {
+                text = "Appended to the kernel command line on the next Start; the Engine log shows the exact argv."
+                textSize = 11f
+                setTextColor(activity.color(R.color.on_surface_3))
+                setPadding(activity.dpi(4), activity.dpi(2), activity.dpi(4), 0)
+            }
+        )
+        col.addView(argsWrap)
 
         // ---- one button for everyone else ----------------------------------
         val sendWrap = activity.column().apply {

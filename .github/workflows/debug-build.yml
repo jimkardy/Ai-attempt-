@@ -284,7 +284,22 @@ jobs:
 
             **arm64-v8a only, Android 10–15.** 32-bit, x86 and x86_64 phones are refused at install.
 
-            ## What is new in 0.3.2
+            ## What is new in 0.3.3
+
+            - **The missing switch: `seccomp=on`.** The kernel was starting in its ptrace userspace
+              mode because nothing asked for anything else, and in that mode every guest syscall is
+              intercepted with ptrace. Android's app seccomp filter then killed the guest with SIGSYS
+              (exit 159) at its first syscall, which is what the 0.3.2 report showed. The port's
+              `SECCOMP` userspace mode exists for exactly this host: the guest's syscalls are trapped
+              and emulated in-process instead of being traced. It is now passed on every launch — the
+              boot log will say `Userspace mode: SECCOMP` instead of `ptrace`.
+            - The Debug tab has a small **extra kernel parameters** field (debug builds). It is appended
+              to the kernel command line after the defaults, so `seccomp=auto`, `nocancel` or
+              `con0=null,fd:1` can be tried without a new APK, and the Engine log records it.
+            - The static guest init, exit-code explanations, growable disk and in-guest trim from 0.3.2
+              are unchanged and included.
+
+            ## What arrived in 0.3.2
 
             - **The reason 0.3.1 did not boot is now handled.** Every Start died in ~0.4 s with exit
               code 159 = 128 + 31 (SIGSYS): Android's app seccomp filter trapped a system call made by
